@@ -12,6 +12,8 @@ Commands
             Data Sets (needed for first-purchase / routine-trader checks)
   track     compute forward returns (vs SPY) for logged signals
   report    show recent logged signals
+  digest    email an analysis report: recent signals (who bought, when, how much),
+            the scorecard by tier, and which factors are paying
   notify-test  send a test push/email alert
 
 Requires: Python 3.9+, `requests`. Optional: `yfinance` (liquidity + price context).
@@ -22,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import html as _html
 import io
 import json
 import os
@@ -45,10 +48,14 @@ CFG = {
     "min_price": 2.0,             # no sub-$2 stocks
     "min_adv_usd": 3_000_000,     # user's liquidity floor (20-day avg dollar volume)
     "big_adv_usd": 100_000_000,   # very liquid/large names: weaker signal in studies
-    "cluster_window_days": 30,
+    # Published cluster definitions are far tighter than a month: same or consecutive
+    # trading days / within 2 days (academic), 7-15 days (practitioner screens).
+    # 14 days is the compromise; the tight bonus below still rewards buys within 2 days.
+    "cluster_window_days": 14,
     "tight_cluster_days": 2,
     "late_filing_days": 4,        # calendar days tx->filing beyond which we flag "late"
     "alert_min_score": 40,
+    "failure_alert_hours": 6,     # at most one "scanner FAILED" alert per command per this many hours
 }
 ROLE_PTS = {"CFO": 20, "CEO": 17, "OFFICER": 14, "DIRECTOR": 12, "10%OWNER": 4, "OTHER": 4}
 CLUSTER_PTS = {1: 0, 2: 14, 3: 22}   # 4+ -> 28
@@ -92,6 +99,8 @@ CREATE TABLE IF NOT EXISTS gapfill(
 CREATE TABLE IF NOT EXISTS outcomes(
   signal_id INTEGER, horizon INTEGER, ret REAL, spy_ret REAL,
   PRIMARY KEY(signal_id, horizon));
+CREATE TABLE IF NOT EXISTS meta(
+  key TEXT PRIMARY KEY, value TEXT);
 """
 
 
@@ -584,6 +593,30 @@ def collapse_rows(rows):
     return out
 
 
+def build_buyers(by_owner):
+    """One entry per insider: who, position, when, how much, and holdings afterwards."""
+    buyers = []
+    for rs in by_owner.values():
+        names = []
+        for x in rs:
+            if x["owner_name"] not in names:
+                names.append(x["owner_name"])
+        best = max(rs, key=lambda x: ROLE_PTS[x["role"]])
+        shares = sum(x["shares"] for x in rs)
+        value = sum(x["value"] for x in rs)
+        label = " / ".join(names[:2]) + (f" +{len(names) - 2} more" if len(names) > 2 else "")
+        newest = max(rs, key=lambda x: x["tx_date"])
+        buyers.append({
+            "name": label, "role": best["role"], "title": best["title"] or best["role"].title(),
+            "first_tx": min(x["tx_date"] for x in rs), "last_tx": max(x["tx_date"] for x in rs),
+            "filed": max(x["filed_date"] for x in rs),
+            "shares": round(shares), "avg_price": round(value / shares, 2) if shares else 0.0,
+            "value": round(value), "holdings_after": newest["post_shares"],
+        })
+    buyers.sort(key=lambda b: (b["first_tx"], -b["value"]))
+    return buyers
+
+
 def score_issuer(con, issuer_cik, px=None, cfg=CFG):
     """Score an issuer's current insider-buying cluster. Returns dict or None."""
     latest = con.execute("SELECT MAX(tx_date) m FROM purchases WHERE issuer_cik=?", (issuer_cik,)).fetchone()["m"]
@@ -661,8 +694,10 @@ def score_issuer(con, issuer_cik, px=None, cfg=CFG):
         "lead_role": lead["role"], "lead_owner": lead["owner_name"], "lead_title": lead["title"],
         "total_value": round(total_value), "holdings_increase": None if inc is None else (
             "new/>100%" if inc == float("inf") else round(inc, 3)),
-        "latest_tx": latest, "latest_filed": max(r["filed_date"] for r in rows),
+        "window_start": min(r["tx_date"] for r in rows), "latest_tx": latest,
+        "latest_filed": max(r["filed_date"] for r in rows),
         "latest_accession": acc, "flags": flags, "context": ctx,
+        "buyers": build_buyers(by_owner),
     }
 
 
@@ -719,19 +754,116 @@ def log_signals(con, results, min_score):
     return new
 
 
-def format_alert(new) -> str:
-    lines = []
-    for r in new:
-        c = r["context"] or {}
-        extra = f" | ADV ${c['adv20_usd'] / 1e6:.1f}M, 52wH {c['dist_52w_high']:+.0%}" if c else ""
-        flags = f" [{' '.join(r['flags'])}]" if r["flags"] else ""
-        lines.append(f"{r['tier']}{r['score']:.0f} {r['ticker']} - {r['n_insiders']} insider(s), lead {r['lead_role']} "
-                     f"{r['lead_owner']}, ${r['total_value']:,} filed {r['latest_filed']}{extra}{flags}")
+def _money(v):
+    return f"${v:,.0f}"
+
+
+def _when(b):
+    return b["first_tx"] if b["first_tx"] == b["last_tx"] else f"{b['first_tx']} to {b['last_tx']}"
+
+
+def _pct(v):
+    return "n/a" if v is None else format(v, "+.0%")
+
+
+def buyer_lines(r):
+    """Who bought, their position, how much in dollars, when, and what they hold afterwards."""
+    out = []
+    for b in r.get("buyers") or []:
+        hold = (f"holds {b['holdings_after']:,.0f} sh after" if b.get("holdings_after") is not None
+                else "holdings n/a")
+        out.append(f"  - {b['name']} ({b['title']}): {_money(b['value'])} = {b['shares']:,} sh "
+                   f"@ ${b['avg_price']:.2f}; bought {_when(b)}, filed {b['filed']}; {hold}")
+    return out
+
+
+def signal_block(r):
+    """Multi-line plain-text description of one signal."""
+    c = r.get("context") or {}
+    extra = f" | ADV ${c['adv20_usd'] / 1e6:.1f}M" if c.get("adv20_usd") is not None else ""
+    flags = f" [{' '.join(r['flags'])}]" if r.get("flags") else ""
+    lines = [f"{r['tier']}{r['score']:.0f} {r['ticker']} - {r['n_insiders']} insider(s), lead {r['lead_role']} "
+             f"{r['lead_owner']}, ${r['total_value']:,} filed {r['latest_filed']}{extra}{flags}"]
+    if r.get("window_start"):
+        lines.append(f"  Buys dated {r['window_start']} to {r['latest_tx']}")
+    lines += buyer_lines(r)
+    if c.get("last") is not None:
+        lines.append(f"  Price ${c['last']:.2f}, {_pct(c.get('dist_52w_high'))} vs 52-wk high, "
+                     f"63-day move {_pct(c.get('ret_63d'))}")
     return "\n".join(lines)
 
 
-def notify(title: str, body: str, priority: str = "default") -> list:
-    """Push via ntfy (NTFY_TOPIC) and/or email via Gmail SMTP (GMAIL_USER + GMAIL_APP_PASSWORD).
+def format_alert(new, limit=3800) -> str:
+    text = "\n\n".join(signal_block(r) for r in new)
+    return text if len(text) <= limit else text[:limit - 20] + "\n...(truncated)"
+
+
+def push_text(new, limit=1000) -> str:
+    """Compact version for Pushover (1,024-character message cap)."""
+    lines = []
+    for r in new[:5]:
+        c = r.get("context") or {}
+        lines.append(f"{r['tier']}{r['score']:.0f} {r['ticker']} {r['n_insiders']} insider(s) ${r['total_value']:,}"
+                     + (f" ADV${c['adv20_usd'] / 1e6:.1f}M" if c.get("adv20_usd") is not None else ""))
+        for b in (r.get("buyers") or [])[:4]:
+            lines.append(f" {b['name']} ({b['title']}) {_money(b['value'])} {_when(b)}")
+    text = "\n".join(lines)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def email_html(new, heading) -> str:
+    e = _html.escape
+    out = [f"<div style='font-family:Arial,sans-serif;font-size:14px'><h2>{e(heading)}</h2>"]
+    for r in new:
+        c = r.get("context") or {}
+        link = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={r['issuer_cik']}&type=4"
+        out.append(f"<h3 style='margin-bottom:2px'>{e(r['ticker'])} - {e(r.get('issuer', ''))} "
+                   f"<span style='color:#555'>(Tier {r['tier']}, score {r['score']:.0f})</span></h3>")
+        meta = [f"{r['n_insiders']} insider(s)", f"{_money(r['total_value'])} total",
+                f"buys {r.get('window_start', '?')} to {r.get('latest_tx', '?')}",
+                f"latest filing {r.get('latest_filed', '?')}"]
+        if c.get("adv20_usd") is not None:
+            meta += [f"ADV ${c['adv20_usd'] / 1e6:.1f}M", f"{_pct(c.get('dist_52w_high'))} vs 52-wk high",
+                     f"63-day {_pct(c.get('ret_63d'))}"]
+        out.append("<div style='color:#333'>" + " | ".join(e(m) for m in meta) + "</div>")
+        if r.get("flags"):
+            out.append(f"<div style='color:#a00'>Flags: {e(', '.join(r['flags']))}</div>")
+        rows = ""
+        for b in r.get("buyers") or []:
+            hold = f"{b['holdings_after']:,.0f}" if b.get("holdings_after") is not None else "n/a"
+            rows += (f"<tr><td>{e(b['name'])}</td><td>{e(b['title'])}</td><td>{e(_when(b))}</td>"
+                     f"<td>{e(b['filed'])}</td><td align='right'>{b['shares']:,}</td>"
+                     f"<td align='right'>${b['avg_price']:.2f}</td>"
+                     f"<td align='right'><b>{_money(b['value'])}</b></td><td align='right'>{hold}</td></tr>")
+        if rows:
+            out.append("<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse;margin-top:6px'>"
+                       "<tr style='background:#eee'><th>Insider</th><th>Position</th><th>Bought</th><th>Filed</th>"
+                       "<th>Shares</th><th>Avg price</th><th>$ value</th><th>Holds after</th></tr>" + rows + "</table>")
+        out.append(f"<div><a href='{e(link)}'>All Form 4 filings on SEC.gov</a></div>")
+    out.append("</div>")
+    return "".join(out)
+
+
+def send_gmail(subject, body, html_body=None) -> bool:
+    """Email via Gmail SMTP (GMAIL_USER + GMAIL_APP_PASSWORD -> ALERT_EMAIL). Returns True if sent."""
+    user, pw = os.environ.get("GMAIL_USER", "").strip(), os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+    if not (user and pw):
+        return False
+    m = EmailMessage()
+    m["Subject"], m["From"] = subject, user
+    m["To"] = os.environ.get("ALERT_EMAIL", user).strip() or user
+    m.set_content(body)
+    if html_body:
+        m.add_alternative(html_body, subtype="html")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as sm:
+        sm.login(user, pw)
+        sm.send_message(m)
+    return True
+
+
+def notify(title: str, body: str, priority: str = "default", html_body: str | None = None,
+           push_body: str | None = None) -> list:
+    """Push via ntfy (NTFY_TOPIC), Pushover, and/or email via Gmail SMTP (GMAIL_USER + GMAIL_APP_PASSWORD).
     Never raises. Returns the channels that worked."""
     sent = []
     topic = os.environ.get("NTFY_TOPIC", "").strip()
@@ -752,33 +884,58 @@ def notify(title: str, body: str, priority: str = "default") -> list:
         try:
             import requests
             r = requests.post("https://api.pushover.net/1/messages.json", timeout=20,
-                              data={"token": po_tok, "user": po_usr, "title": title, "message": body[:1000],
+                              data={"token": po_tok, "user": po_usr, "title": title[:240],
+                                    "message": (push_body or body)[:1000],
                                     "priority": 1 if priority == "high" else 0})
             r.raise_for_status()
             sent.append("pushover")
         except Exception as e:
             print(f"pushover failed: {e}", file=sys.stderr)
-    user, pw = os.environ.get("GMAIL_USER", "").strip(), os.environ.get("GMAIL_APP_PASSWORD", "").strip()
-    if user and pw:
-        try:
-            m = EmailMessage()
-            m["Subject"], m["From"] = title, user
-            m["To"] = os.environ.get("ALERT_EMAIL", user).strip() or user
-            m.set_content(body)
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as sm:
-                sm.login(user, pw)
-                sm.send_message(m)
+    try:
+        if send_gmail(title, body, html_body):
             sent.append("email")
-        except Exception as e:
-            print(f"email failed: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"email failed: {e}", file=sys.stderr)
     if not sent:
         print("(no alert channel configured or all failed)", file=sys.stderr)
     return sent
 
 
+def should_alert_failure(con, key, hours=None, now=None) -> bool:
+    """True at most once per `hours` per command, so a 30-minute schedule does not buzz
+    your phone all night during an SEC outage."""
+    hours = CFG["failure_alert_hours"] if hours is None else hours
+    now = now or dt.datetime.now(dt.timezone.utc)
+    row = con.execute("SELECT value FROM meta WHERE key=?", (f"fail_alert_{key}",)).fetchone()
+    if row and now - dt.datetime.fromisoformat(row["value"]) < dt.timedelta(hours=hours):
+        return False
+    con.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (f"fail_alert_{key}", now.isoformat()))
+    con.commit()
+    return True
+
+
+def alert_new(new):
+    """One alert for a batch of new signals: full detail by email, compact by push."""
+    top = max(r["score"] for r in new)
+    title = f"Insider buys: {len(new)} new signal(s), top {max(new, key=lambda r: r['score'])['ticker']} ({top:.0f})"
+    return notify(title, format_alert(new), "high" if top >= 60 else "default",
+                  html_body=email_html(new, title), push_body=push_text(new))
+
+
 def cmd_notify_test(args, con):
-    sent = notify("Insider scanner test", "If you can read this, alerts work.")
-    print("sent via:", sent or "NOTHING (check NTFY_TOPIC / GMAIL_* settings)")
+    sample = [{"tier": "A", "score": 72, "ticker": "TEST", "issuer": "Test Corp", "issuer_cik": "1",
+               "n_insiders": 2, "lead_role": "CFO", "lead_owner": "Doe Jane", "total_value": 150000,
+               "flags": [], "context": {}, "window_start": "2026-11-03", "latest_tx": "2026-11-04",
+               "latest_filed": "2026-11-05",
+               "buyers": [{"name": "Doe Jane", "role": "CFO", "title": "Chief Financial Officer",
+                           "first_tx": "2026-11-03", "last_tx": "2026-11-03", "filed": "2026-11-05",
+                           "shares": 10000, "avg_price": 5.0, "value": 50000, "holdings_after": 60000},
+                          {"name": "Roe Richard", "role": "DIRECTOR", "title": "Director",
+                           "first_tx": "2026-11-04", "last_tx": "2026-11-04", "filed": "2026-11-05",
+                           "shares": 20000, "avg_price": 5.0, "value": 100000, "holdings_after": 120000}]}]
+    sent = notify("Insider scanner test (sample data)", format_alert(sample), "default",
+                  html_body=email_html(sample, "Insider scanner test (sample data)"), push_body=push_text(sample))
+    print("sent via:", sent or "NOTHING (check NTFY_TOPIC / PUSHOVER_* / GMAIL_* settings)")
 
 
 def append_signal_log(new, path):
@@ -817,13 +974,9 @@ def print_results(results):
     if not results:
         print("No new signals above threshold.")
         return
-    print(f"{'T':1} {'Scr':>4} {'Tkr':6} {'#Ins':>4} {'Lead':8} {'$ Total':>11} {'Filed':10} Flags / context")
     for r in results:
-        c = r["context"]
-        ctx = (f"ADV${c['adv20_usd']/1e6:.1f}M  52wH {c['dist_52w_high']:+.0%}  63d {c['ret_63d'] if c['ret_63d'] is None else format(c['ret_63d'], '+.0%')}"
-               if c else "")
-        print(f"{r['tier']:1} {r['score']:>4.0f} {r['ticker']:6} {r['n_insiders']:>4} {r['lead_role']:8} "
-              f"{r['total_value']:>11,} {r['latest_filed']:10} {ctx} {' '.join(r['flags'])}")
+        print(signal_block(r))
+        print()
 
 
 def write_csv(results, out_dir: Path):
@@ -832,14 +985,17 @@ def write_csv(results, out_dir: Path):
     with open(p, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["tier", "score", "ticker", "issuer", "n_insiders", "tight_cluster", "lead_role",
-                    "lead_owner", "lead_title", "total_value", "holdings_increase", "latest_tx",
-                    "latest_filed", "flags", "adv20_usd", "dist_52w_high", "ret_63d", "points"])
+                    "lead_owner", "lead_title", "total_value", "holdings_increase", "buys_from", "latest_tx",
+                    "latest_filed", "flags", "adv20_usd", "dist_52w_high", "ret_63d", "points", "buyers"])
         for r in results:
             c = r["context"] or {}
             w.writerow([r["tier"], r["score"], r["ticker"], r["issuer"], r["n_insiders"], r["tight_cluster"],
                         r["lead_role"], r["lead_owner"], r["lead_title"], r["total_value"],
-                        r["holdings_increase"], r["latest_tx"], r["latest_filed"], ";".join(r["flags"]),
-                        c.get("adv20_usd"), c.get("dist_52w_high"), c.get("ret_63d"), json.dumps(r["points"])])
+                        r["holdings_increase"], r.get("window_start"), r["latest_tx"], r["latest_filed"],
+                        ";".join(r["flags"]), c.get("adv20_usd"), c.get("dist_52w_high"), c.get("ret_63d"),
+                        json.dumps(r["points"]),
+                        "; ".join(f"{b['name']} ({b['title']}) {_money(b['value'])} on {_when(b)}"
+                                  for b in r.get("buyers") or [])])
     return p
 
 
@@ -866,9 +1022,7 @@ def cmd_scan(args, con):
         print(f"\nCSV: {write_csv(new, Path(args.home) / 'out')}")
         append_signal_log(new, args.signals_log)
         if not args.no_alert:
-            top = max(r["score"] for r in new)
-            notify(f"Insider buys: {len(new)} new signal(s)", format_alert(new),
-                   "high" if top >= 60 else "default")
+            alert_new(new)
 
 
 def cmd_report(args, con):
@@ -905,9 +1059,8 @@ def compute_outcomes(con, today=None, history=fetch_history):
     con.commit()
 
 
-def cmd_track(args, con):
-    compute_outcomes(con)
-    print(f"{'Tier':4} {'Horizon':>7} {'N':>4} {'MeanExc':>8} {'MedExc':>8} {'Win%':>6}")
+def track_rows(con):
+    out = []
     for tier in ("A", "B", "C"):
         for hz in HORIZONS:
             rows = con.execute(
@@ -915,8 +1068,100 @@ def cmd_track(args, con):
                    WHERE s.tier=? AND o.horizon=? AND o.spy_ret IS NOT NULL""", (tier, hz)).fetchall()
             ex = [r["ret"] - r["spy_ret"] for r in rows]
             if ex:
-                print(f"{tier:4} {hz:>5}d {len(ex):>4} {statistics.mean(ex):>+8.1%} "
-                      f"{statistics.median(ex):>+8.1%} {sum(e > 0 for e in ex) / len(ex):>6.0%}")
+                out.append((tier, hz, len(ex), statistics.mean(ex), statistics.median(ex),
+                            sum(e > 0 for e in ex) / len(ex)))
+    return out
+
+
+def track_text(con) -> str:
+    lines = [f"{'Tier':4} {'Horizon':>7} {'N':>4} {'MeanExc':>8} {'MedExc':>8} {'Win%':>6}"]
+    for tier, hz, n, mean, med, win in track_rows(con):
+        lines.append(f"{tier:4} {hz:>5}d {n:>4} {mean:>+8.1%} {med:>+8.1%} {win:>6.0%}")
+    return "\n".join(lines)
+
+
+def cmd_track(args, con):
+    compute_outcomes(con)
+    print(track_text(con))
+
+
+def _safe(fn, p):
+    try:
+        return bool(fn(p))
+    except Exception:
+        return False
+
+
+FACTORS = {
+    "3+ insiders buying": lambda p: p["n_insiders"] >= 3,
+    "buys within 2 days of each other": lambda p: p.get("tight_cluster"),
+    "CFO or CEO is lead buyer": lambda p: p["lead_role"] in ("CFO", "CEO"),
+    "first buy in 12 months (verified)": lambda p: p["points"].get("first_buy") == FIRST_PURCHASE_PTS,
+    "holdings up 10%+ (lead buyer)": lambda p: p["points"].get("rel_size", 0) >= 6,
+    "30%+ below 52-week high": lambda p: p["context"]["dist_52w_high"] <= -0.30,
+}
+
+
+def factor_rows(con, horizons=(21, 63)):
+    """Which features go with better 21/63-day returns vs SPY? (needs forward returns computed)."""
+    out = []
+    for hz in horizons:
+        data = con.execute(
+            """SELECT s.payload p, o.ret - o.spy_ret ex FROM outcomes o JOIN signals s ON s.id=o.signal_id
+               WHERE o.spy_ret IS NOT NULL AND o.horizon=?""", (hz,)).fetchall()
+        parsed = [(json.loads(r["p"]), r["ex"]) for r in data]
+        for name, fn in FACTORS.items():
+            yes = [ex for p, ex in parsed if _safe(fn, p)]
+            no = [ex for p, ex in parsed if not _safe(fn, p)]
+            if yes or no:
+                out.append((name, hz, len(yes), statistics.mean(yes) if yes else None,
+                            len(no), statistics.mean(no) if no else None))
+    return out
+
+
+def factor_text(con) -> str:
+    rows = factor_rows(con)
+    if not rows:
+        return "No finished forward returns yet (signals need to be at least 21 trading days old)."
+    lines = [f"{'Factor':36} {'Hz':>4} {'With (N)':>14} {'Without (N)':>14}"]
+    for name, hz, ny, my, nn, mn in rows:
+        f = lambda m, n: "n/a" if m is None else f"{m:+.1%} ({n})"            # noqa: E731
+        lines.append(f"{name:36} {hz:>3}d {f(my, ny):>14} {f(mn, nn):>14}")
+    lines.append("Average return minus SPY. Treat any cell with N under about 30 as noise.")
+    return "\n".join(lines)
+
+
+def build_digest(con, days):
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+    results = [json.loads(r["payload"]) for r in con.execute(
+        "SELECT payload FROM signals WHERE detected_at>=? ORDER BY score DESC", (since,)).fetchall()]
+    n_all = con.execute("SELECT COUNT(*) c FROM signals").fetchone()["c"]
+    title = f"Insider scanner report: {len(results)} signal(s) in the last {days} day(s)"
+    text = "\n".join([title, "", format_alert(results, limit=60000) if results else "No new signals in this period.",
+                      "", f"SCORECARD (all {n_all} logged signals; excess return vs SPY)", track_text(con),
+                      "", "WHICH FACTORS ARE PAYING", factor_text(con)])
+    e = _html.escape
+    html_body = ((email_html(results, title) if results else f"<h2>{e(title)}</h2><p>No new signals in this period.</p>")
+                 + f"<h3>Scorecard (all {n_all} logged signals; excess return vs SPY)</h3><pre>{e(track_text(con))}</pre>"
+                 + f"<h3>Which factors are paying</h3><pre>{e(factor_text(con))}</pre>")
+    return title, text, html_body
+
+
+def cmd_digest(args, con):
+    restore_signals(con, args.signals_log)
+    try:
+        compute_outcomes(con)
+    except Exception as e:
+        print(f"could not refresh forward returns: {e}", file=sys.stderr)
+    title, text, html_body = build_digest(con, args.days)
+    if args.print:
+        print(text)
+    try:
+        ok = send_gmail(title, text, html_body)
+    except Exception as e:
+        print(f"email failed: {e}", file=sys.stderr)
+        ok = False
+    print("Digest emailed" if ok else "Digest not emailed (set GMAIL_USER, GMAIL_APP_PASSWORD, ALERT_EMAIL)")
 
 
 def main(argv=None):
@@ -938,19 +1183,22 @@ def main(argv=None):
     b = sub.add_parser("backfill")
     b.add_argument("--quarters", type=int, default=14)
     sub.add_parser("track")
+    d = sub.add_parser("digest")
+    d.add_argument("--days", type=int, default=1)
+    d.add_argument("--print", action="store_true", help="also print the report")
     sub.add_parser("notify-test")
     r = sub.add_parser("report")
     r.add_argument("--days", type=int, default=14)
     args = ap.parse_args(argv)
     con = connect(Path(args.home) / "insider.db")
     fn = {"scan": cmd_scan, "backfill": cmd_backfill, "track": cmd_track, "report": cmd_report,
-          "notify-test": cmd_notify_test}[args.cmd]
+          "digest": cmd_digest, "notify-test": cmd_notify_test}[args.cmd]
     try:
         if args.cmd == "track":
             restore_signals(con, args.signals_log)
         fn(args, con)
     except Exception:
-        if args.cmd in ("scan", "track", "backfill"):
+        if args.cmd in ("scan", "track", "backfill", "digest") and should_alert_failure(con, args.cmd):
             notify(f"Insider scanner {args.cmd} FAILED", traceback.format_exc()[-1500:], "high")
         raise
 

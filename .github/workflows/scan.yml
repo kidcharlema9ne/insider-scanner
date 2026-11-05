@@ -1,18 +1,21 @@
 name: Insider scanner
 
-# Cron times are UTC. 12:17 UTC = 7:17 AM US Eastern in winter (8:17 AM in summer).
+# Cron times are UTC. EDGAR accepts Form 4s 6 AM-10 PM Eastern on weekdays, so we scan every
+# 30 minutes across that window: 11:07-23:37 UTC (6:07 AM-6:37 PM winter) plus 00:07-02:37 UTC
+# (7:07-9:37 PM winter). In summer (EDT) the same times are one hour later. ~32 scans a day.
 # Odd minutes on purpose: GitHub delays jobs queued at :00 by 5-30 minutes.
 on:
   schedule:
-    - cron: "17 12 * * 1-5"    # weekday morning scan
-    - cron: "41 23 * * 1-5"    # weekday evening scan (6:41 PM winter)
-    - cron: "23 13 * * 6"      # Saturday: forward-return report + heartbeat commit
+    - cron: "7,37 11-23 * * 1-5"   # weekday daytime scans
+    - cron: "7,37 0-2 * * 2-6"     # weekday evening scans (UTC date has already rolled over)
+    - cron: "20 3 * * 2-6"         # nightly report email (10:20 PM winter, after EDGAR closes)
+    - cron: "23 13 * * 6"          # Saturday: 7-day report email + scorecard + heartbeat commit
   workflow_dispatch:
     inputs:
       mode:
         description: "What to run"
         type: choice
-        options: [scan, track, backfill, notify-test]
+        options: [scan, track, digest, digest-week, backfill, notify-test]
         default: scan
 
 concurrency:
@@ -46,7 +49,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run offline tests
-        run: python test_insider_scanner.py
+        run: python -m unittest test_insider_scanner test_new_features
 
       - name: Restore database cache
         id: dbcache
@@ -62,7 +65,9 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "cmd=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event.schedule }}" = "23 13 * * 6" ]; then
-            echo "cmd=track" >> "$GITHUB_OUTPUT"
+            echo "cmd=digest-week" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "20 3 * * 2-6" ]; then
+            echo "cmd=digest" >> "$GITHUB_OUTPUT"
           else
             echo "cmd=scan" >> "$GITHUB_OUTPUT"
           fi
@@ -79,7 +84,10 @@ jobs:
         if: steps.mode.outputs.cmd != 'backfill'
         run: |
           mkdir -p .state
-          python -u insider_scanner.py --home .state ${{ steps.mode.outputs.cmd }} 2>&1 | tee run.log
+          CMD="${{ steps.mode.outputs.cmd }}"
+          if [ "$CMD" = "digest-week" ]; then CMD="digest --days 7 --print"; fi
+          if [ "$CMD" = "digest" ]; then CMD="digest --days 1 --print"; fi
+          python -u insider_scanner.py --home .state $CMD 2>&1 | tee run.log
           { echo '### ${{ steps.mode.outputs.cmd }}'; echo '```'; tail -n 60 run.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save database cache
@@ -92,7 +100,7 @@ jobs:
       - name: Commit signal log (also keeps the repo active)
         if: always()
         run: |
-          if [ "${{ steps.mode.outputs.cmd }}" = "track" ]; then date -u +"%Y-%m-%dT%H:%MZ" > data/heartbeat.txt; fi
+          if [ "${{ steps.mode.outputs.cmd }}" = "digest-week" ] || [ "${{ steps.mode.outputs.cmd }}" = "track" ]; then date -u +"%Y-%m-%dT%H:%MZ" > data/heartbeat.txt; fi
           git config user.name "insider-scanner-bot"
           git config user.email "insider-scanner-bot@users.noreply.github.com"
           git add data/
