@@ -1,0 +1,99 @@
+name: Insider scanner
+
+# Cron times are UTC. 12:17 UTC = 7:17 AM US Eastern in winter (8:17 AM in summer).
+# Odd minutes on purpose: GitHub delays jobs queued at :00 by 5-30 minutes.
+on:
+  schedule:
+    - cron: "17 12 * * 1-5"    # weekday morning scan
+    - cron: "41 23 * * 1-5"    # weekday evening scan (6:41 PM winter)
+    - cron: "23 13 * * 6"      # Saturday: forward-return report + heartbeat commit
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        options: [scan, track, backfill, notify-test]
+        default: scan
+
+concurrency:
+  group: insider-scanner
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT || 'M D mgd.dorsey@gmail.com' }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+      PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+      GMAIL_USER: ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      ALERT_EMAIL: ${{ secrets.ALERT_EMAIL || 'mgd.dorsey@gmail.com' }}
+      SIGNALS_LOG: data/signals.jsonl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run offline tests
+        run: python test_insider_scanner.py
+
+      - name: Restore database cache
+        id: dbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: .state/insider.db
+          key: insider-db-${{ github.run_id }}
+          restore-keys: insider-db-
+
+      - name: Decide what to run
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "cmd=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "23 13 * * 6" ]; then
+            echo "cmd=track" >> "$GITHUB_OUTPUT"
+          else
+            echo "cmd=scan" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build history if the database is missing
+        if: steps.mode.outputs.cmd != 'notify-test'
+        run: |
+          mkdir -p .state
+          if [ ! -f .state/insider.db ] || [ "${{ steps.mode.outputs.cmd }}" = "backfill" ]; then
+            python -u insider_scanner.py --home .state backfill --quarters 14
+          fi
+
+      - name: Run
+        if: steps.mode.outputs.cmd != 'backfill'
+        run: |
+          mkdir -p .state
+          python -u insider_scanner.py --home .state ${{ steps.mode.outputs.cmd }} 2>&1 | tee run.log
+          { echo '### ${{ steps.mode.outputs.cmd }}'; echo '```'; tail -n 60 run.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save database cache
+        if: always() && hashFiles('.state/insider.db') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .state/insider.db
+          key: insider-db-${{ github.run_id }}
+
+      - name: Commit signal log (also keeps the repo active)
+        if: always()
+        run: |
+          if [ "${{ steps.mode.outputs.cmd }}" = "track" ]; then date -u +"%Y-%m-%dT%H:%MZ" > data/heartbeat.txt; fi
+          git config user.name "insider-scanner-bot"
+          git config user.email "insider-scanner-bot@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet || (git commit -m "data: update signal log [skip ci]" && git push)
