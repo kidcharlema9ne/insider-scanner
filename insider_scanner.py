@@ -849,24 +849,24 @@ REPORT_CSS = """
 @media (prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#1a1f26;--ink:#e8ebef;--mute:#9aa4af;--line:#2b323b;--a:#3ecf7a;--b:#6ea2ff;--c:#9aa4af;--red:#ff8a80}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
-.wrap{max-width:760px;margin:0 auto;padding:16px}
-h1{font-size:1.35rem;margin:6px 0 2px}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 32px}
+h1{font-size:1.9rem;margin:6px 0 4px}
 .sub{color:var(--mute);font-size:.9rem;margin-bottom:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:14px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px 28px;margin:20px 0}
 .head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.tk{font-size:1.5rem;font-weight:700}
-.iss{color:var(--mute);flex:1 1 100%}
+.tk{font-size:2rem;font-weight:700}
+.iss{color:var(--mute);font-size:1.1rem}
 .badge{border-radius:999px;padding:3px 11px;font-weight:700;font-size:.85rem;color:#fff}
 .ta{background:var(--a)}.tb{background:var(--b)}.tc{background:var(--c)}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
 .stat{border:1px solid var(--line);border-radius:10px;padding:8px 10px}
 .stat b{display:block;font-size:1.05rem}.stat span{color:var(--mute);font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
 .flags{color:var(--red);font-weight:600;margin:6px 0}
-.buyer{border-top:1px solid var(--line);padding:10px 0}
-.buyer:first-of-type{border-top:0}
-.bn{font-weight:650}.bt{color:var(--mute);font-size:.9rem}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:.92rem;margin-top:4px}
-.grid .k{color:var(--mute)}
+table.bt{width:100%;border-collapse:collapse;margin-top:6px;font-size:.98rem}
+table.bt th{text-align:left;color:var(--mute);font-size:.78rem;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid var(--line);padding:8px 10px}
+table.bt td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top}
+table.bt td.n,table.bt th.n{text-align:right;white-space:nowrap}
+.role{color:var(--mute);font-size:.88rem}
 .btn{display:inline-block;margin-top:8px;padding:9px 14px;border-radius:10px;background:var(--b);color:#fff;text-decoration:none;font-weight:600}
 details{margin:16px 0;color:var(--mute);font-size:.9rem}summary{cursor:pointer;font-weight:600;color:var(--ink)}
 footer{color:var(--mute);font-size:.8rem;margin:20px 0 30px}
@@ -944,18 +944,17 @@ def report_page(new, heading, now=None) -> str:
             out.append(f"<div class='flags'>Flags: {e(', '.join(r['flags']))}</div>")
         out.append("<div class='stats'>" + "".join(
             f"<div class='stat'><span>{e(k)}</span><b>{e(str(v))}</b></div>" for k, v in stats) + "</div>")
+        rows = ""
         for b in r.get("buyers") or []:
             hold = f"{b['holdings_after']:,.0f}" if b.get("holdings_after") is not None else "n/a"
-            out.append(
-                "<div class='buyer'>"
-                f"<div class='bn'>{e(str(b['name']))}</div><div class='bt'>{e(str(b['title']))}</div>"
-                "<div class='grid'>"
-                f"<span class='k'>Bought</span><span>{e(_when(b))}</span>"
-                f"<span class='k'>Filed</span><span>{e(str(b['filed']))}</span>"
-                f"<span class='k'>Shares</span><span>{b['shares']:,} at ${b['avg_price']:.2f}</span>"
-                f"<span class='k'>Value</span><span><b>{e(_money(b['value']))}</b></span>"
-                f"<span class='k'>Holds after</span><span>{e(hold)} shares</span>"
-                "</div></div>")
+            rows += (f"<tr><td><b>{e(str(b['name']))}</b><div class='role'>{e(str(b['title']))}</div></td>"
+                     f"<td>{e(_when(b))}</td><td>{e(str(b['filed']))}</td>"
+                     f"<td class='n'>{b['shares']:,}</td><td class='n'>${b['avg_price']:.2f}</td>"
+                     f"<td class='n'><b>{e(_money(b['value']))}</b></td><td class='n'>{e(hold)}</td></tr>")
+        if rows:
+            out.append("<table class='bt'><tr><th>Insider</th><th>Bought</th><th>Filed</th>"
+                       "<th class='n'>Shares</th><th class='n'>Avg price</th><th class='n'>$ value</th>"
+                       "<th class='n'>Holds after</th></tr>" + rows + "</table>")
         out.append(f"<a class='btn' href='{e(link)}'>All Form 4 filings on SEC.gov</a></div>")
     out.append(REPORT_HELP)
     out.append("<footer>Research leads from public SEC Form 4 filings, not investment advice. "
