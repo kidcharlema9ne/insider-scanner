@@ -11,7 +11,8 @@ import os
 import insider_scanner as S
 
 # Tests must never see real alert credentials (GitHub Actions injects them as env vars).
-for _k in ("NTFY_TOPIC", "PUSHOVER_TOKEN", "PUSHOVER_USER", "GMAIL_USER", "GMAIL_APP_PASSWORD", "ALERT_EMAIL"):
+for _k in ("NTFY_TOPIC", "PUSHOVER_TOKEN", "PUSHOVER_USER", "GMAIL_USER", "GMAIL_APP_PASSWORD", "ALERT_EMAIL",
+           "GITHUB_REPOSITORY", "REPORT_BASE_URL", "PUBLISH_PUSH"):
     os.environ.pop(_k, None)
 
 
