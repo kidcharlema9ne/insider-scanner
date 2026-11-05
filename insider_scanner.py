@@ -673,7 +673,8 @@ def candidates(con, lookback_days: int, today: dt.date):
     since = (today - dt.timedelta(days=lookback_days)).isoformat()
     return [r["issuer_cik"] for r in con.execute(
         """SELECT DISTINCT issuer_cik FROM purchases
-           WHERE filed_date>=? AND plan10b5=0 AND value>=? AND price>=?""",
+           WHERE filed_date>=? AND plan10b5=0 AND value>=? AND price>=?
+             AND UPPER(COALESCE(ticker,'')) NOT IN ('', 'NONE', 'N/A', 'NA')""",
         (since, CFG["min_value_usd"], CFG["min_price"]))]
 
 

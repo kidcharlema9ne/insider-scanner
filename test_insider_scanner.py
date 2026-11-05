@@ -296,6 +296,16 @@ class IpoAndCollapseTests(unittest.TestCase):
             S.price_features = orig
 
 
+class TickerFilterTests(unittest.TestCase):
+    def test_issuers_without_a_ticker_are_skipped(self):
+        c = db()
+        for i, tk in enumerate(("NONE", "N/A", "", "ACME")):
+            c.execute("INSERT INTO purchases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      (f"a{i}", f"10{i}", tk, "X", "o", "o", "CFO", "", "2026-11-03", "2026-11-04", "2026-11-04",
+                       10000, 5.0, 50000.0, None, 0, "live"))
+        self.assertEqual(S.candidates(c, 5, dt.date(2026, 11, 5)), ["103"])
+
+
 class GapFillTests(unittest.TestCase):
     SUB = {"filings": {"recent": {"form": ["4", "10-Q", "4", "4", "4/A"],
                                   "accessionNumber": ["0000000001-26-000010", "0000000001-26-000011",
