@@ -3,13 +3,14 @@ name: Insider scanner
 # Cron times are UTC. EDGAR accepts Form 4s 6 AM-10 PM Eastern on weekdays, so we scan every
 # 30 minutes across that window: 11:07-23:37 UTC (6:07 AM-6:37 PM winter) plus 00:07-02:37 UTC
 # (7:07-9:37 PM winter). In summer (EDT) the same times are one hour later. ~32 scans a day.
+# Alerts: a scan sends a report ONLY when a new filing creates or changes a signal. No scheduled
+# nightly/morning reports. (digest / digest-week remain available by hand via "Run workflow".)
 # Odd minutes on purpose: GitHub delays jobs queued at :00 by 5-30 minutes.
 on:
   schedule:
     - cron: "7,37 11-23 * * 1-5"   # weekday daytime scans
     - cron: "7,37 0-2 * * 2-6"     # weekday evening scans (UTC date has already rolled over)
-    - cron: "20 3 * * 2-6"         # nightly report email (10:20 PM winter, after EDGAR closes)
-    - cron: "23 13 * * 6"          # Saturday: 7-day report email + scorecard + heartbeat commit
+    - cron: "23 13 * * 6"          # Saturday: silent scorecard update + heartbeat commit (no email)
   workflow_dispatch:
     inputs:
       mode:
@@ -65,9 +66,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "cmd=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event.schedule }}" = "23 13 * * 6" ]; then
-            echo "cmd=digest-week" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "20 3 * * 2-6" ]; then
-            echo "cmd=digest" >> "$GITHUB_OUTPUT"
+            echo "cmd=track" >> "$GITHUB_OUTPUT"
           else
             echo "cmd=scan" >> "$GITHUB_OUTPUT"
           fi
