@@ -844,6 +844,182 @@ def email_html(new, heading) -> str:
     return "".join(out)
 
 
+REPORT_CSS = """
+:root{--bg:#f4f5f7;--card:#fff;--ink:#14171a;--mute:#5b6570;--line:#e3e6ea;--a:#0a7d3b;--b:#1456c8;--c:#6b7280;--red:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#1a1f26;--ink:#e8ebef;--mute:#9aa4af;--line:#2b323b;--a:#3ecf7a;--b:#6ea2ff;--c:#9aa4af;--red:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:16px}
+h1{font-size:1.35rem;margin:6px 0 2px}
+.sub{color:var(--mute);font-size:.9rem;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:14px 0}
+.head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tk{font-size:1.5rem;font-weight:700}
+.iss{color:var(--mute);flex:1 1 100%}
+.badge{border-radius:999px;padding:3px 11px;font-weight:700;font-size:.85rem;color:#fff}
+.ta{background:var(--a)}.tb{background:var(--b)}.tc{background:var(--c)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+.stat{border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.stat b{display:block;font-size:1.05rem}.stat span{color:var(--mute);font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
+.flags{color:var(--red);font-weight:600;margin:6px 0}
+.buyer{border-top:1px solid var(--line);padding:10px 0}
+.buyer:first-of-type{border-top:0}
+.bn{font-weight:650}.bt{color:var(--mute);font-size:.9rem}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:.92rem;margin-top:4px}
+.grid .k{color:var(--mute)}
+.btn{display:inline-block;margin-top:8px;padding:9px 14px;border-radius:10px;background:var(--b);color:#fff;text-decoration:none;font-weight:600}
+details{margin:16px 0;color:var(--mute);font-size:.9rem}summary{cursor:pointer;font-weight:600;color:var(--ink)}
+footer{color:var(--mute);font-size:.8rem;margin:20px 0 30px}
+a{color:var(--b)}
+ul.rep{list-style:none;padding:0;margin:0}
+ul.rep li{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:10px 0}
+ul.rep a{display:block;padding:12px 14px;text-decoration:none;color:var(--ink)}
+ul.rep small{color:var(--mute);display:block}
+"""
+
+REPORT_HELP = (
+    "<details><summary>How to read this</summary>"
+    "<p><b>Tier / score:</b> the scanner's rating of how strong the buying pattern is. Higher means more insiders, "
+    "more senior roles, bigger purchases compared with what they already own, and a stock that trades enough to act on.</p>"
+    "<p><b>Insiders:</b> officers and directors of the company. Only purchases they made with their own money in the "
+    "open market are counted.</p>"
+    "<p><b>Avg daily $ volume:</b> roughly how many dollars of the stock change hands per day. Bigger means easier "
+    "to buy and sell.</p>"
+    "<p><b>Holds after:</b> how many shares that person owns after the purchase.</p>"
+    "<p><b>vs 52-week high:</b> how far the price is below its highest price of the past year.</p></details>"
+)
+
+
+def _ny_time(now=None):
+    now = now or dt.datetime.now(dt.timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return now.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        return now
+
+
+def _report_base_url() -> str:
+    base = os.environ.get("REPORT_BASE_URL", "").strip()
+    if not base:
+        repo = os.environ.get("GITHUB_REPOSITORY", "")
+        if "/" in repo:
+            owner, name = repo.split("/", 1)
+            base = f"https://{owner.lower()}.github.io/{name}/"
+    return base if (not base or base.endswith("/")) else base + "/"
+
+
+def _page(title: str, body: str) -> str:
+    e = _html.escape
+    return ("<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<title>{e(title)}</title><style>{REPORT_CSS}</style></head>"
+            f"<body><div class='wrap'>{body}</div></body></html>")
+
+
+def report_page(new, heading, now=None) -> str:
+    """Full, phone-friendly HTML page for a batch of signals (what the alert links to)."""
+    e = _html.escape
+    ny = _ny_time(now)
+    out = [f"<h1>{e(heading)}</h1><div class='sub'>{ny:%a %b %d, %Y %I:%M %p} Eastern - "
+           f"<a href='index.html'>all reports</a></div>"]
+    for r in new:
+        c = r.get("context") or {}
+        tier = str(r.get("tier", ""))
+        badge = {"A": "ta", "B": "tb"}.get(tier, "tc")
+        link = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={r['issuer_cik']}&type=4"
+        stats = [("Insiders buying", str(r["n_insiders"])), ("Total bought", _money(r["total_value"])),
+                 ("Buy dates", f"{r.get('window_start', '?')} to {r.get('latest_tx', '?')}"),
+                 ("Latest filing", str(r.get("latest_filed", "?")))]
+        if c.get("adv20_usd") is not None:
+            stats += [("Avg daily $ volume", f"${c['adv20_usd'] / 1e6:.1f}M"),
+                      ("Vs 52-week high", _pct(c.get("dist_52w_high"))), ("63-day move", _pct(c.get("ret_63d")))]
+        if c.get("last") is not None:
+            stats.insert(2, ("Price", f"${c['last']:.2f}"))
+        out.append("<div class='card'><div class='head'>"
+                   f"<span class='tk'>{e(str(r['ticker']))}</span>"
+                   f"<span class='badge {badge}'>Tier {e(tier)} - score {r['score']:.0f}</span>"
+                   f"<span class='iss'>{e(str(r.get('issuer', '')))}</span></div>")
+        if r.get("flags"):
+            out.append(f"<div class='flags'>Flags: {e(', '.join(r['flags']))}</div>")
+        out.append("<div class='stats'>" + "".join(
+            f"<div class='stat'><span>{e(k)}</span><b>{e(str(v))}</b></div>" for k, v in stats) + "</div>")
+        for b in r.get("buyers") or []:
+            hold = f"{b['holdings_after']:,.0f}" if b.get("holdings_after") is not None else "n/a"
+            out.append(
+                "<div class='buyer'>"
+                f"<div class='bn'>{e(str(b['name']))}</div><div class='bt'>{e(str(b['title']))}</div>"
+                "<div class='grid'>"
+                f"<span class='k'>Bought</span><span>{e(_when(b))}</span>"
+                f"<span class='k'>Filed</span><span>{e(str(b['filed']))}</span>"
+                f"<span class='k'>Shares</span><span>{b['shares']:,} at ${b['avg_price']:.2f}</span>"
+                f"<span class='k'>Value</span><span><b>{e(_money(b['value']))}</b></span>"
+                f"<span class='k'>Holds after</span><span>{e(hold)} shares</span>"
+                "</div></div>")
+        out.append(f"<a class='btn' href='{e(link)}'>All Form 4 filings on SEC.gov</a></div>")
+    out.append(REPORT_HELP)
+    out.append("<footer>Research leads from public SEC Form 4 filings, not investment advice. "
+               "Always check the filing yourself.</footer>")
+    return _page(heading, "".join(out))
+
+
+def index_page(items) -> str:
+    e = _html.escape
+    lis = "".join(
+        f"<li><a href='reports/{e(i['file'])}'><b>{e(i['title'])}</b>"
+        f"<small>{e(i['when'])} - {e(i['tickers'])}</small></a></li>" for i in items)
+    body = ("<h1>Insider scanner reports</h1><div class='sub'>Newest first</div>"
+            + (f"<ul class='rep'>{lis}</ul>" if lis else "<p>No reports yet.</p>"))
+    return _page("Insider scanner reports", body)
+
+
+def _git_publish(paths, msg) -> None:
+    """In GitHub Actions only (PUBLISH_PUSH=1): commit and push the report files right away so the
+    link in the alert goes live within a minute or two."""
+    if os.environ.get("PUBLISH_PUSH") != "1":
+        return
+    import subprocess
+    try:
+        def run(*a):
+            return subprocess.run(a, check=True, capture_output=True, text=True, timeout=90)
+        run("git", "config", "user.name", "insider-scanner-bot")
+        run("git", "config", "user.email", "insider-scanner-bot@users.noreply.github.com")
+        run("git", "add", *paths)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode:
+            run("git", "commit", "-m", msg)
+            run("git", "push")
+    except Exception as ex:
+        print(f"report publish (git) failed: {ex}", file=sys.stderr)
+
+
+def publish_report(new, heading, name_hint="", docs_dir=None, now=None):
+    """Write the report page + index into docs/ and return its public URL (None if no base URL)."""
+    base = _report_base_url()
+    if not base or not new:
+        return None
+    try:
+        now = now or dt.datetime.now(dt.timezone.utc)
+        docs = Path(docs_dir) if docs_dir else Path(__file__).resolve().parent / "docs"
+        (docs / "reports").mkdir(parents=True, exist_ok=True)
+        ny = _ny_time(now)
+        top = max(new, key=lambda r: r["score"])["ticker"]
+        fname = f"{ny:%Y%m%d-%H%M%S}-{re.sub('[^A-Za-z0-9]', '', name_hint or str(top))}.html"
+        (docs / "reports" / fname).write_text(report_page(new, heading, now), encoding="utf-8")
+        mpath = docs / "reports.json"
+        items = json.loads(mpath.read_text(encoding="utf-8")) if mpath.exists() else []
+        items.insert(0, {"file": fname, "title": heading, "when": f"{ny:%a %b %d %I:%M %p} ET",
+                         "tickers": ", ".join(str(r["ticker"]) for r in new[:8])})
+        items = items[:200]
+        mpath.write_text(json.dumps(items), encoding="utf-8")
+        (docs / "index.html").write_text(index_page(items), encoding="utf-8")
+        (docs / ".nojekyll").touch()
+        _git_publish([str(docs)], f"report: {heading}")
+        return f"{base}reports/{fname}"
+    except Exception as ex:
+        print(f"report publish failed: {ex}", file=sys.stderr)
+        return None
+
+
 def send_gmail(subject, body, html_body=None) -> bool:
     """Email via Gmail SMTP (GMAIL_USER + GMAIL_APP_PASSWORD -> ALERT_EMAIL). Returns True if sent."""
     user, pw = os.environ.get("GMAIL_USER", "").strip(), os.environ.get("GMAIL_APP_PASSWORD", "").strip()
@@ -862,7 +1038,7 @@ def send_gmail(subject, body, html_body=None) -> bool:
 
 
 def notify(title: str, body: str, priority: str = "default", html_body: str | None = None,
-           push_body: str | None = None) -> list:
+           push_body: str | None = None, url: str | None = None) -> list:
     """Push via ntfy (NTFY_TOPIC), Pushover, and/or email via Gmail SMTP (GMAIL_USER + GMAIL_APP_PASSWORD).
     Never raises. Returns the channels that worked."""
     sent = []
@@ -871,6 +1047,8 @@ def notify(title: str, body: str, priority: str = "default", html_body: str | No
         try:
             import requests
             headers = {"Title": title.encode("ascii", "replace").decode(), "Priority": priority}
+            if url:
+                headers["Click"] = url
             to_addr = os.environ.get("ALERT_EMAIL", "").strip()
             if to_addr and not (os.environ.get("GMAIL_USER", "").strip() and os.environ.get("GMAIL_APP_PASSWORD", "").strip()):
                 headers["X-Email"] = to_addr      # ntfy also forwards the alert to this email address
@@ -883,15 +1061,20 @@ def notify(title: str, body: str, priority: str = "default", html_body: str | No
     if po_tok and po_usr:
         try:
             import requests
-            r = requests.post("https://api.pushover.net/1/messages.json", timeout=20,
-                              data={"token": po_tok, "user": po_usr, "title": title[:240],
-                                    "message": (push_body or body)[:1000],
-                                    "priority": 1 if priority == "high" else 0})
+            po = {"token": po_tok, "user": po_usr, "title": title[:240],
+                  "message": (push_body or body)[:1000], "priority": 1 if priority == "high" else 0}
+            if url:
+                po.update({"url": url, "url_title": "Open full report"})
+            r = requests.post("https://api.pushover.net/1/messages.json", timeout=20, data=po)
             r.raise_for_status()
             sent.append("pushover")
         except Exception as e:
             print(f"pushover failed: {e}", file=sys.stderr)
     try:
+        if url:
+            body = f"{body}\n\nFull report: {url}"
+            if html_body:
+                html_body += f"<p><a href='{_html.escape(url)}'>Open the full report</a></p>"
         if send_gmail(title, body, html_body):
             sent.append("email")
     except Exception as e:
@@ -918,8 +1101,9 @@ def alert_new(new):
     """One alert for a batch of new signals: full detail by email, compact by push."""
     top = max(r["score"] for r in new)
     title = f"Insider buys: {len(new)} new signal(s), top {max(new, key=lambda r: r['score'])['ticker']} ({top:.0f})"
+    url = publish_report(new, title)
     return notify(title, format_alert(new), "high" if top >= 60 else "default",
-                  html_body=email_html(new, title), push_body=push_text(new))
+                  html_body=email_html(new, title), push_body=push_text(new), url=url)
 
 
 def cmd_notify_test(args, con):
@@ -933,8 +1117,11 @@ def cmd_notify_test(args, con):
                           {"name": "Roe Richard", "role": "DIRECTOR", "title": "Director",
                            "first_tx": "2026-11-04", "last_tx": "2026-11-04", "filed": "2026-11-05",
                            "shares": 20000, "avg_price": 5.0, "value": 100000, "holdings_after": 120000}]}]
+    url = publish_report(sample, "Insider scanner test (sample data)", name_hint="TEST")
+    print("report link:", url or "none (no GITHUB_REPOSITORY / REPORT_BASE_URL)")
     sent = notify("Insider scanner test (sample data)", format_alert(sample), "default",
-                  html_body=email_html(sample, "Insider scanner test (sample data)"), push_body=push_text(sample))
+                  html_body=email_html(sample, "Insider scanner test (sample data)"), push_body=push_text(sample),
+                  url=url)
     print("sent via:", sent or "NOTHING (check NTFY_TOPIC / PUSHOVER_* / GMAIL_* settings)")
 
 

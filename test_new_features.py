@@ -171,5 +171,49 @@ class DigestAndFactorTests(unittest.TestCase):
         self.assertIn("Doe Jane", mail.call_args[0][1])
 
 
+
+class ReportPageTests(unittest.TestCase):
+    SAMPLE = [{"tier": "A", "score": 72, "ticker": "TST<b>", "issuer": "Test & Co", "issuer_cik": "1",
+               "n_insiders": 1, "lead_role": "CFO", "lead_owner": "Doe", "total_value": 50000,
+               "flags": ["X"], "context": {}, "window_start": "2026-11-03", "latest_tx": "2026-11-03",
+               "latest_filed": "2026-11-05",
+               "buyers": [{"name": "Doe <i>", "role": "CFO", "title": "CFO", "first_tx": "2026-11-03",
+                           "last_tx": "2026-11-03", "filed": "2026-11-05", "shares": 10000, "avg_price": 5.0,
+                           "value": 50000, "holdings_after": 60000}]}]
+
+    def test_page_escapes_and_has_viewport(self):
+        h = S.report_page(self.SAMPLE, "Heading <x>")
+        self.assertIn("viewport", h)
+        self.assertNotIn("<b>", h.split("<body>")[1].split("TST")[1][:6])
+        self.assertIn("TST&lt;b&gt;", h)
+        self.assertIn("Doe &lt;i&gt;", h)
+
+    def test_publish_writes_files_and_returns_url(self):
+        with tempfile.TemporaryDirectory() as d, m.patch.dict(
+                os.environ, {"GITHUB_REPOSITORY": "Me/repo", "PUBLISH_PUSH": ""}, clear=False):
+            url = S.publish_report(self.SAMPLE, "Title", docs_dir=d)
+            self.assertTrue(url.startswith("https://me.github.io/repo/reports/"))
+            self.assertTrue((Path(d) / "reports" / url.rsplit("/", 1)[1]).exists())
+            self.assertIn("Title", (Path(d) / "index.html").read_text(encoding="utf-8"))
+
+    def test_no_base_url_means_no_link(self):
+        with tempfile.TemporaryDirectory() as d, m.patch.dict(
+                os.environ, {"GITHUB_REPOSITORY": "", "REPORT_BASE_URL": ""}, clear=False):
+            self.assertIsNone(S.publish_report(self.SAMPLE, "Title", docs_dir=d))
+
+    def test_pushover_gets_link(self):
+        sent = {}
+
+        class R:
+            def raise_for_status(self): pass
+        def fake_post(url, **kw):
+            sent.update(kw.get("data") or {})
+            return R()
+        with m.patch.dict(os.environ, {"PUSHOVER_TOKEN": "t", "PUSHOVER_USER": "u"}, clear=False), \
+                m.patch("requests.post", fake_post):
+            S.notify("T", "b", url="https://x/y.html")
+        self.assertEqual(sent.get("url"), "https://x/y.html")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,7 @@ jobs:
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
       SIGNALS_LOG: data/signals.jsonl
+      PUBLISH_PUSH: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -102,5 +103,5 @@ jobs:
           if [ "${{ steps.mode.outputs.cmd }}" = "digest-week" ] || [ "${{ steps.mode.outputs.cmd }}" = "track" ]; then date -u +"%Y-%m-%dT%H:%MZ" > data/heartbeat.txt; fi
           git config user.name "insider-scanner-bot"
           git config user.email "insider-scanner-bot@users.noreply.github.com"
-          git add data/
-          git diff --cached --quiet || (git commit -m "data: update signal log [skip ci]" && git push)
+          git add data/ docs/ 2>/dev/null || git add data/
+          git diff --cached --quiet || (git commit -m "data: update signal log and reports" && git push)
