@@ -117,6 +117,10 @@ def connect(path: Path) -> sqlite3.Connection:
 # --------------------------------------------------------------------------
 class Edgar:
     def __init__(self, user_agent: str, rps: float = 4.0):
+        # Secrets pasted on a phone often carry a trailing newline/space or smart quotes, which
+        # makes `requests` reject the header. Collapse whitespace and drop non-ASCII/quotes.
+        user_agent = " ".join((user_agent or "").split()).strip("\"'")
+        user_agent = user_agent.encode("ascii", "ignore").decode("ascii").strip()
         if "@" not in (user_agent or ""):
             raise SystemExit(
                 "SEC requires a declared User-Agent with contact info.\n"
