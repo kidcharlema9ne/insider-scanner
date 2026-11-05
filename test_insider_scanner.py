@@ -358,12 +358,14 @@ class ScanPlumbingTests(unittest.TestCase):
 
     def test_notify_ntfy_and_no_channel(self):
         import os, unittest.mock as m
-        with m.patch.dict(os.environ, {"NTFY_TOPIC": "t123"}, clear=False), \
+        with m.patch.dict(os.environ, {"NTFY_TOPIC": "t123", "ALERT_EMAIL": "", "PUSHOVER_TOKEN": "", "PUSHOVER_USER": "",
+                                       "GMAIL_USER": "", "GMAIL_APP_PASSWORD": ""}, clear=False), \
                 m.patch("requests.post") as post:
             post.return_value.raise_for_status = lambda: None
             self.assertEqual(S.notify("Title", "body"), ["ntfy"])
             self.assertEqual(post.call_args[0][0], "https://ntfy.sh/t123")
-        with m.patch.dict(os.environ, {"NTFY_TOPIC": "", "GMAIL_USER": "", "GMAIL_APP_PASSWORD": ""}):
+        with m.patch.dict(os.environ, {"NTFY_TOPIC": "", "GMAIL_USER": "", "GMAIL_APP_PASSWORD": "",
+                                       "PUSHOVER_TOKEN": "", "PUSHOVER_USER": ""}):
             self.assertEqual(S.notify("T", "b"), [])
 
     def test_notify_email_via_ntfy_header(self):
@@ -384,7 +386,9 @@ class ScanPlumbingTests(unittest.TestCase):
 
     def test_notify_failure_never_raises(self):
         import os, unittest.mock as m
-        with m.patch.dict(os.environ, {"NTFY_TOPIC": "t"}), m.patch("requests.post", side_effect=OSError("down")):
+        with m.patch.dict(os.environ, {"NTFY_TOPIC": "t", "ALERT_EMAIL": "", "PUSHOVER_TOKEN": "", "PUSHOVER_USER": "",
+                                       "GMAIL_USER": "", "GMAIL_APP_PASSWORD": ""}), \
+                m.patch("requests.post", side_effect=OSError("down")):
             self.assertEqual(S.notify("T", "b"), [])
 
     def test_signal_log_roundtrip(self):
