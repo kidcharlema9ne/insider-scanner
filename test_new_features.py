@@ -214,6 +214,13 @@ class ReportPageTests(unittest.TestCase):
             S.notify("T", "b", url="https://x/y.html")
         self.assertEqual(sent.get("url"), "https://x/y.html")
 
+    def test_wait_until_live_polls_until_200(self):
+        codes = iter([404, 404, 200])
+        class R:
+            def __init__(self, c): self.status_code = c
+        with m.patch("requests.get", lambda *a, **k: R(next(codes))), m.patch.object(S.time, "sleep"):
+            self.assertTrue(S._wait_until_live("https://x", timeout=60, every=0))
+
 
 if __name__ == "__main__":
     unittest.main()

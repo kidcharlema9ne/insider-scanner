@@ -991,6 +991,20 @@ def _git_publish(paths, msg) -> None:
         print(f"report publish (git) failed: {ex}", file=sys.stderr)
 
 
+def _wait_until_live(url, timeout=300, every=8) -> bool:
+    """Poll until the report URL answers 200 so the alert never arrives before its page exists."""
+    import requests
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if requests.get(url, timeout=15).status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(every)
+    return False
+
+
 def publish_report(new, heading, name_hint="", docs_dir=None, now=None):
     """Write the report page + index into docs/ and return its public URL (None if no base URL)."""
     base = _report_base_url()
@@ -1013,7 +1027,12 @@ def publish_report(new, heading, name_hint="", docs_dir=None, now=None):
         (docs / "index.html").write_text(index_page(items), encoding="utf-8")
         (docs / ".nojekyll").touch()
         _git_publish([str(docs)], f"report: {heading}")
-        return f"{base}reports/{fname}"
+        url = f"{base}reports/{fname}"
+        if os.environ.get("PUBLISH_PUSH") == "1":
+            print("waiting for the report page to go live...")
+            if not _wait_until_live(url):
+                print("report page not live after 5 minutes; sending the alert anyway", file=sys.stderr)
+        return url
     except Exception as ex:
         print(f"report publish failed: {ex}", file=sys.stderr)
         return None
