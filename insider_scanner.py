@@ -44,8 +44,12 @@ from pathlib import Path
 # Configuration (priors from the literature; edit freely)
 # --------------------------------------------------------------------------
 CFG = {
-    "min_value_usd": 25_000,      # ignore token buys
-    "min_price": 2.0,             # no sub-$2 stocks
+    "min_value_usd": 10_000,      # ignore token buys (lowered from 25k on 2026-11-05)
+    # No price floor (removed 2026-11-05). The $3M ADV floor below is the only liquidity gate.
+    # The old floors are kept ONLY to tag signals the old rules would have blocked, so
+    # `track`/`digest` data can later show whether loosening them helped.
+    "legacy_min_value_usd": 25_000,
+    "legacy_min_price": 2.0,
     "min_adv_usd": 3_000_000,     # user's liquidity floor (20-day avg dollar volume)
     "big_adv_usd": 100_000_000,   # very liquid/large names: weaker signal in studies
     # Published cluster definitions are far tighter than a month: same or consecutive
@@ -697,6 +701,19 @@ def score_issuer(con, issuer_cik, px=None, cfg=CFG):
     if lead["role"] == "10%OWNER":
         flags.append("10pct_owner_only(weak evidence)")
 
+    # Tag signals the retired floors ($25k size, $2 price) would have blocked or shrunk,
+    # so forward-return tracking can compare them against the rest.
+    old_size = cfg["legacy_min_value_usd"]
+    old_px = cfg["legacy_min_price"]
+    size_block = not any(x["value"] >= old_size for x in rows)
+    last_px = px["last"] if px else None
+    price_block = (last_px < old_px) if last_px is not None else all(x["price"] < old_px for x in rows)
+    if size_block or price_block:
+        why = "+".join(n for n, b in (("under25k", size_block), ("under2usd", price_block)) if b)
+        flags.append(f"OLD_FILTER_WOULD_BLOCK({why})")
+    elif any(x["value"] < old_size for x in rows):
+        flags.append("OLD_FILTER_PARTIAL(buys under 25k included)")
+
     score = sum(pts.values())
     tier = "A" if score >= 60 else "B" if score >= cfg["alert_min_score"] else "C"
     acc = max(r["accession"] for r in rows)
@@ -720,9 +737,9 @@ def candidates(con, lookback_days: int, today: dt.date):
     since = (today - dt.timedelta(days=lookback_days)).isoformat()
     return [r["issuer_cik"] for r in con.execute(
         """SELECT DISTINCT issuer_cik FROM purchases
-           WHERE filed_date>=? AND plan10b5=0 AND value>=? AND price>=?
+           WHERE filed_date>=? AND plan10b5=0 AND value>=?
              AND UPPER(COALESCE(ticker,'')) NOT IN ('', 'NONE', 'N/A', 'NA')""",
-        (since, CFG["min_value_usd"], CFG["min_price"]))]
+        (since, CFG["min_value_usd"]))]
 
 
 def run_scoring(con, lookback_days, today=None, use_prices=True, edgar=None):
@@ -743,8 +760,6 @@ def run_scoring(con, lookback_days, today=None, use_prices=True, edgar=None):
             res["flags"].append("HISTORY_GAP")
         if px and px["adv20"] < CFG["min_adv_usd"]:
             continue                      # fails the $3M ADV liquidity floor
-        if px and px["last"] < CFG["min_price"]:
-            continue
         results.append(res)
     return sorted(results, key=lambda r: -r["score"])
 

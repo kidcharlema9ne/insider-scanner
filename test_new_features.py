@@ -22,6 +22,33 @@ def cluster_db():
     return c
 
 
+class LoosenedFilterTests(unittest.TestCase):
+    """Nov 2026: size floor lowered to $10k, price floor removed; old floors only tag signals."""
+
+    def test_small_cheap_buy_is_scored_and_tagged(self):
+        c = db()
+        add(c, "1", "Doe Jane", "CFO", "2026-11-03", filed="2026-11-05", value=12000, shares=10000, post=20000)
+        r = S.score_issuer(c, "999999")          # $12k at $1.20/share: old rules blocked both ways
+        self.assertIsNotNone(r)
+        self.assertTrue(any(f.startswith("OLD_FILTER_WOULD_BLOCK(under25k+under2usd)") for f in r["flags"]))
+
+    def test_under_floor_ten_thousand_still_ignored(self):
+        c = db()
+        add(c, "1", "Doe Jane", "CFO", "2026-11-03", filed="2026-11-05", value=9000, shares=1000, post=5000)
+        self.assertIsNone(S.score_issuer(c, "999999"))
+
+    def test_large_normal_buy_has_no_old_filter_tag(self):
+        c = db()
+        add(c, "1", "Doe Jane", "CFO", "2026-11-03", filed="2026-11-05", value=50000, shares=2000, post=9000)
+        r = S.score_issuer(c, "999999")          # $25/share, $50k: passes old rules
+        self.assertFalse(any(f.startswith("OLD_FILTER") for f in r["flags"]))
+
+    def test_candidates_include_sub_two_dollar_stock(self):
+        c = db()
+        add(c, "1", "Doe Jane", "CFO", "2026-11-03", filed="2026-11-05", value=30000, shares=30000, post=60000)
+        self.assertEqual(S.candidates(c, 30, dt.date(2026, 11, 5)), ["999999"])
+
+
 class BuyerDetailTests(unittest.TestCase):
     def test_buyers_have_name_position_dollars_dates_holdings(self):
         r = S.score_issuer(cluster_db(), "999999")
