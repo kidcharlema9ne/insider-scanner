@@ -6,13 +6,13 @@ Runs in the cloud on GitHub Actions: a scan every 30 minutes on weekdays while E
 an emailed report each night after EDGAR closes, and a 7-day report with the scorecard on Saturday morning.
 Alerts only go out when a NEW filing creates or changes a signal; quiet scans send nothing.
 
-Files: `insider_scanner.py` (code) - `test_insider_scanner.py` + `test_new_features.py` (offline tests, 55) -
+Files: `insider_scanner.py` (code) - `test_insider_scanner.py` + `test_new_features.py` (offline tests, 62) -
 `.github/workflows/scan.yml` (schedule) - `data/signals.jsonl` (every signal ever raised; lets the
 database be rebuilt if GitHub's cache is lost).
 
 Secrets (repo Settings > Secrets and variables > Actions): any of `NTFY_TOPIC`, `PUSHOVER_TOKEN` + `PUSHOVER_USER`,
 `GMAIL_USER` + `GMAIL_APP_PASSWORD` (+ optional `ALERT_EMAIL`), `SEC_USER_AGENT`. Every channel that is set is used.
-Each alert lists every buyer: name, position, $ amount, shares, price, buy dates, filing date, holdings afterwards.
+Each alert lists every buyer: name, position, $ bought, buy dates, filing date, estimated $ holdings afterwards and the % the buy added to prior holdings (no share counts), plus a score-breakdown table (factor, trigger, points, research basis).
 
 Guards added Nov 5 2026 after the ASPE false positive: IPO/directed-share/underwriter footnotes are
 excluded; stocks with < 60 trading days of price history are skipped; joint-reported identical lots

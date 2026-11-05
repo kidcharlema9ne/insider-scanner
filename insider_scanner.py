@@ -606,16 +606,24 @@ def build_buyers(by_owner):
             if x["owner_name"] not in names:
                 names.append(x["owner_name"])
         best = max(rs, key=lambda x: ROLE_PTS[x["role"]])
-        shares = sum(x["shares"] for x in rs)
+        shares = sum(x["shares"] for x in rs)          # internal only, never displayed
         value = sum(x["value"] for x in rs)
         label = " / ".join(names[:2]) + (f" +{len(names) - 2} more" if len(names) > 2 else "")
         newest = max(rs, key=lambda x: x["tx_date"])
+        post = newest["post_shares"]
+        px = value / shares if shares else 0.0
+        hold_usd = round(post * px) if (post is not None and px) else None
+        if post is None or not shares:
+            pct = None
+        elif post > shares:
+            pct = round(shares / (post - shares), 3)     # purchase as % added to prior holdings
+        else:
+            pct = "new"                                   # no prior holdings: brand-new position
         buyers.append({
             "name": label, "role": best["role"], "title": best["title"] or best["role"].title(),
             "first_tx": min(x["tx_date"] for x in rs), "last_tx": max(x["tx_date"] for x in rs),
             "filed": max(x["filed_date"] for x in rs),
-            "shares": round(shares), "avg_price": round(value / shares, 2) if shares else 0.0,
-            "value": round(value), "holdings_after": newest["post_shares"],
+            "value": round(value), "holdings_after_usd": hold_usd, "pct_increase": pct,
         })
     buyers.sort(key=lambda b: (b["first_tx"], -b["value"]))
     return buyers
@@ -770,14 +778,61 @@ def _pct(v):
     return "n/a" if v is None else format(v, "+.0%")
 
 
+def _holdings(b):
+    """-> (dollar value of holdings after the buy, % increase) as display strings.
+    Falls back to the old share-based fields so previously logged signals still render."""
+    usd, pct = b.get("holdings_after_usd"), b.get("pct_increase", "?")
+    if usd is None and b.get("holdings_after") is not None and b.get("avg_price"):
+        usd = b["holdings_after"] * b["avg_price"]
+    if pct == "?":
+        sh, post = b.get("shares"), b.get("holdings_after")
+        pct = (sh / (post - sh) if post is not None and sh and post > sh else "new" if post is not None else None)
+    usd_s = "n/a" if usd is None else _money(usd)
+    pct_s = "n/a" if pct is None else ("new position" if pct == "new" else f"+{pct:.0%}")
+    return usd_s, pct_s
+
+
+BASIS = {
+    "role": "CFO > CEO > other officers > directors; 10% owners weak (CXO Advisory summary of 1992-2002 data; Zhao 2026)",
+    "cluster": "Several insiders buying beats one (Alldredge & Blank; cluster paper: 3.8% vs 2.0% over 21 days)",
+    "first_buy": "First buy in 12 months beats repeat buys (Zhao 2026: 5.0% vs 2.7%)",
+    "routine": "Same-month buying 3 years running = routine, ~0 edge (Cohen, Malloy, Pomorski 2012)",
+    "rel_size": "Size relative to what they already own, not raw dollars (literature prior, not fitted)",
+    "big_adv": "Signal weaker in very liquid large caps (CEO Watcher data; literature prior)",
+}
+
+
+def score_breakdown(r):
+    """-> [(factor, what triggered it, points, evidence basis)] explaining the score."""
+    pts = r.get("points") or {}
+    hi = r.get("holdings_increase")
+    hi_s = "n/a" if hi is None else ("new position" if hi == "new/>100%" else f"+{hi:.0%}")
+    detail = {
+        "role": f"Lead buyer is {r.get('lead_role')} ({r.get('lead_owner')})",
+        "cluster": f"{r.get('n_insiders')} separate insider(s) within {CFG['cluster_window_days']} days"
+                   + (", two started within 2 days" if r.get("tight_cluster") else ""),
+        "first_buy": "Verified first buy in 12 months" if pts.get("first_buy") == FIRST_PURCHASE_PTS
+                     else "Could not verify buy history (half credit)",
+        "routine": "Buys in this same month for 3 straight years",
+        "rel_size": f"Lead buyer's holdings up {hi_s}",
+        "big_adv": "Very liquid stock (avg daily volume over $100M)",
+    }
+    names = {"role": "Role", "cluster": "Cluster", "first_buy": "First buy", "routine": "Routine pattern",
+             "rel_size": "Size vs holdings", "big_adv": "Large-cap penalty"}
+    return [(names.get(k, k), detail.get(k, ""), v, BASIS.get(k, "")) for k, v in pts.items()]
+
+
+def breakdown_line(r):
+    return "; ".join(f"{f} {v:+.0f}" for f, _, v, _ in score_breakdown(r))
+
+
 def buyer_lines(r):
     """Who bought, their position, how much in dollars, when, and what they hold afterwards."""
     out = []
     for b in r.get("buyers") or []:
-        hold = (f"holds {b['holdings_after']:,.0f} sh after" if b.get("holdings_after") is not None
-                else "holdings n/a")
-        out.append(f"  - {b['name']} ({b['title']}): {_money(b['value'])} = {b['shares']:,} sh "
-                   f"@ ${b['avg_price']:.2f}; bought {_when(b)}, filed {b['filed']}; {hold}")
+        usd_s, pct_s = _holdings(b)
+        out.append(f"  - {b['name']} ({b['title']}): bought {_money(b['value'])} ({pct_s} to holdings), "
+                   f"now holds ~{usd_s}; bought {_when(b)}, filed {b['filed']}")
     return out
 
 
@@ -791,6 +846,8 @@ def signal_block(r):
     if r.get("window_start"):
         lines.append(f"  Buys dated {r['window_start']} to {r['latest_tx']}")
     lines += buyer_lines(r)
+    if r.get("points"):
+        lines.append(f"  Score: {breakdown_line(r)}")
     if c.get("last") is not None:
         lines.append(f"  Price ${c['last']:.2f}, {_pct(c.get('dist_52w_high'))} vs 52-wk high, "
                      f"63-day move {_pct(c.get('ret_63d'))}")
@@ -834,15 +891,22 @@ def email_html(new, heading) -> str:
             out.append(f"<div style='color:#a00'>Flags: {e(', '.join(r['flags']))}</div>")
         rows = ""
         for b in r.get("buyers") or []:
-            hold = f"{b['holdings_after']:,.0f}" if b.get("holdings_after") is not None else "n/a"
+            usd_s, pct_s = _holdings(b)
             rows += (f"<tr><td>{e(b['name'])}</td><td>{e(b['title'])}</td><td>{e(_when(b))}</td>"
-                     f"<td>{e(b['filed'])}</td><td align='right'>{b['shares']:,}</td>"
-                     f"<td align='right'>${b['avg_price']:.2f}</td>"
-                     f"<td align='right'><b>{_money(b['value'])}</b></td><td align='right'>{hold}</td></tr>")
+                     f"<td>{e(b['filed'])}</td>"
+                     f"<td align='right'><b>{_money(b['value'])}</b></td>"
+                     f"<td align='right'>{e(usd_s)}</td><td align='right'>{e(pct_s)}</td></tr>")
         if rows:
             out.append("<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse;margin-top:6px'>"
                        "<tr style='background:#eee'><th>Insider</th><th>Position</th><th>Bought</th><th>Filed</th>"
-                       "<th>Shares</th><th>Avg price</th><th>$ value</th><th>Holds after</th></tr>" + rows + "</table>")
+                       "<th>$ bought</th><th>Holdings after ($)</th><th>Holdings increase</th></tr>" + rows + "</table>")
+        bd = score_breakdown(r)
+        if bd:
+            out.append("<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse;margin-top:8px'>"
+                       "<tr style='background:#eee'><th>Score factor</th><th>What triggered it</th><th>Pts</th>"
+                       "<th>Evidence basis</th></tr>"
+                       + "".join(f"<tr><td>{e(f)}</td><td>{e(d)}</td><td align='right'><b>{v:+.0f}</b></td>"
+                                 f"<td>{e(bs)}</td></tr>" for f, d, v, bs in bd) + "</table>")
         out.append(f"<div><a href='{e(link)}'>All Form 4 filings on SEC.gov</a></div>")
     out.append("</div>")
     return "".join(out)
@@ -889,7 +953,10 @@ REPORT_HELP = (
     "open market are counted.</p>"
     "<p><b>Avg daily $ volume:</b> roughly how many dollars of the stock change hands per day. Bigger means easier "
     "to buy and sell.</p>"
-    "<p><b>Holds after:</b> how many shares that person owns after the purchase.</p>"
+    "<p><b>Holdings after / increase:</b> estimated dollar value of what that person owns after the purchase, and how "
+    "much the purchase added to their prior holdings in percent.</p>"
+    "<p><b>Score breakdown:</b> the points each factor added, what triggered it, and the research it is based on. "
+    "The weights are priors from the literature, not fitted to our own results yet.</p>"
     "<p><b>vs 52-week high:</b> how far the price is below its highest price of the past year.</p></details>"
 )
 
@@ -950,15 +1017,21 @@ def report_page(new, heading, now=None) -> str:
             f"<div class='stat'><span>{e(k)}</span><b>{e(str(v))}</b></div>" for k, v in stats) + "</div>")
         rows = ""
         for b in r.get("buyers") or []:
-            hold = f"{b['holdings_after']:,.0f}" if b.get("holdings_after") is not None else "n/a"
+            usd_s, pct_s = _holdings(b)
             rows += (f"<tr><td><b>{e(str(b['name']))}</b><div class='role'>{e(str(b['title']))}</div></td>"
                      f"<td>{e(_when(b))}</td><td>{e(str(b['filed']))}</td>"
-                     f"<td class='n'>{b['shares']:,}</td><td class='n'>${b['avg_price']:.2f}</td>"
-                     f"<td class='n'><b>{e(_money(b['value']))}</b></td><td class='n'>{e(hold)}</td></tr>")
+                     f"<td class='n'><b>{e(_money(b['value']))}</b></td>"
+                     f"<td class='n'>{e(usd_s)}</td><td class='n'>{e(pct_s)}</td></tr>")
         if rows:
             out.append("<table class='bt'><tr><th>Insider</th><th>Bought</th><th>Filed</th>"
-                       "<th class='n'>Shares</th><th class='n'>Avg price</th><th class='n'>$ value</th>"
-                       "<th class='n'>Holds after</th></tr>" + rows + "</table>")
+                       "<th class='n'>$ bought</th><th class='n'>Holdings after ($)</th>"
+                       "<th class='n'>Holdings increase</th></tr>" + rows + "</table>")
+        bd = score_breakdown(r)
+        if bd:
+            out.append("<table class='bt'><tr><th>Score factor</th><th>What triggered it</th><th class='n'>Pts</th>"
+                       "<th>Evidence basis</th></tr>"
+                       + "".join(f"<tr><td>{e(f)}</td><td>{e(d)}</td><td class='n'><b>{v:+.0f}</b></td>"
+                                 f"<td class='role'>{e(bs)}</td></tr>" for f, d, v, bs in bd) + "</table>")
         out.append(f"<a class='btn' href='{e(link)}'>All Form 4 filings on SEC.gov</a></div>")
     out.append(REPORT_HELP)
     out.append("<footer>Research leads from public SEC Form 4 filings, not investment advice. "
@@ -1135,10 +1208,12 @@ def cmd_notify_test(args, con):
                "latest_filed": "2026-11-05",
                "buyers": [{"name": "Doe Jane", "role": "CFO", "title": "Chief Financial Officer",
                            "first_tx": "2026-11-03", "last_tx": "2026-11-03", "filed": "2026-11-05",
-                           "shares": 10000, "avg_price": 5.0, "value": 50000, "holdings_after": 60000},
+                           "value": 50000, "holdings_after_usd": 300000, "pct_increase": 0.2},
                           {"name": "Roe Richard", "role": "DIRECTOR", "title": "Director",
                            "first_tx": "2026-11-04", "last_tx": "2026-11-04", "filed": "2026-11-05",
-                           "shares": 20000, "avg_price": 5.0, "value": 100000, "holdings_after": 120000}]}]
+                           "value": 100000, "holdings_after_usd": 600000, "pct_increase": 0.2}],
+               "points": {"role": 20, "cluster": 14, "first_buy": 12}, "n_insiders": 2, "tight_cluster": False,
+               "holdings_increase": 0.2}]
     url = publish_report(sample, "Insider scanner test (sample data)", name_hint="TEST")
     print("report link:", url or "none (no GITHUB_REPOSITORY / REPORT_BASE_URL)")
     sent = notify("Insider scanner test (sample data)", format_alert(sample), "default",
@@ -1195,14 +1270,14 @@ def write_csv(results, out_dir: Path):
         w = csv.writer(fh)
         w.writerow(["tier", "score", "ticker", "issuer", "n_insiders", "tight_cluster", "lead_role",
                     "lead_owner", "lead_title", "total_value", "holdings_increase", "buys_from", "latest_tx",
-                    "latest_filed", "flags", "adv20_usd", "dist_52w_high", "ret_63d", "points", "buyers"])
+                    "latest_filed", "flags", "adv20_usd", "dist_52w_high", "ret_63d", "points", "score_breakdown", "buyers"])
         for r in results:
             c = r["context"] or {}
             w.writerow([r["tier"], r["score"], r["ticker"], r["issuer"], r["n_insiders"], r["tight_cluster"],
                         r["lead_role"], r["lead_owner"], r["lead_title"], r["total_value"],
                         r["holdings_increase"], r.get("window_start"), r["latest_tx"], r["latest_filed"],
                         ";".join(r["flags"]), c.get("adv20_usd"), c.get("dist_52w_high"), c.get("ret_63d"),
-                        json.dumps(r["points"]),
+                        json.dumps(r["points"]), breakdown_line(r),
                         "; ".join(f"{b['name']} ({b['title']}) {_money(b['value'])} on {_when(b)}"
                                   for b in r.get("buyers") or [])])
     return p

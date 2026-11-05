@@ -27,17 +27,18 @@ class BuyerDetailTests(unittest.TestCase):
         r = S.score_issuer(cluster_db(), "999999")
         self.assertEqual(len(r["buyers"]), 2)
         jane = r["buyers"][0]
-        self.assertEqual((jane["name"], jane["title"], jane["value"], jane["shares"]),
-                         ("Doe Jane", "Chief Financial Officer", 50000, 10000))
-        self.assertEqual((jane["first_tx"], jane["filed"], jane["holdings_after"]),
-                         ("2026-11-03", "2026-11-05", 60000))
+        self.assertEqual((jane["name"], jane["title"], jane["value"]),
+                         ("Doe Jane", "Chief Financial Officer", 50000))
+        self.assertNotIn("shares", jane)                                # share counts are not exposed
+        self.assertEqual((jane["first_tx"], jane["filed"], jane["holdings_after_usd"], jane["pct_increase"]),
+                         ("2026-11-03", "2026-11-05", 300000, 0.2))
         self.assertEqual(r["buyers"][1]["title"], "Director")          # falls back to role when no title
         self.assertEqual(r["window_start"], "2026-11-03")
 
     def test_text_alert_lists_each_buyer_with_dates(self):
         t = S.format_alert([S.score_issuer(cluster_db(), "999999")])
         for s in ("Doe Jane", "Chief Financial Officer", "$50,000", "2026-11-03", "Roe Richard", "$100,000",
-                  "holds 120,000 sh after", "Buys dated 2026-11-03 to 2026-11-04"):
+                  "now holds ~$600,000", "+20% to holdings", "Buys dated 2026-11-03 to 2026-11-04"):
             self.assertIn(s, t)
 
     def test_old_logged_signals_without_buyers_still_format(self):
@@ -65,8 +66,8 @@ class BuyerDetailTests(unittest.TestCase):
         add(c, "1", "Doe Jane", "CFO", "2026-11-02", value=30000, shares=6000, post=12000)
         add(c, "2", "Doe Jane", "CFO", "2026-11-04", value=40000, shares=8000, post=20000)
         b = S.score_issuer(c, "999999")["buyers"][0]
-        self.assertEqual((b["first_tx"], b["last_tx"], b["value"], b["holdings_after"]),
-                         ("2026-11-02", "2026-11-04", 70000, 20000))
+        self.assertEqual((b["first_tx"], b["last_tx"], b["value"], b["holdings_after_usd"]),
+                         ("2026-11-02", "2026-11-04", 70000, 100000))
         self.assertIn("2026-11-02 to 2026-11-04", S.buyer_lines({"buyers": [b]})[0])
 
     def test_csv_has_buyer_column(self):
@@ -178,8 +179,9 @@ class ReportPageTests(unittest.TestCase):
                "flags": ["X"], "context": {}, "window_start": "2026-11-03", "latest_tx": "2026-11-03",
                "latest_filed": "2026-11-05",
                "buyers": [{"name": "Doe <i>", "role": "CFO", "title": "CFO", "first_tx": "2026-11-03",
-                           "last_tx": "2026-11-03", "filed": "2026-11-05", "shares": 10000, "avg_price": 5.0,
-                           "value": 50000, "holdings_after": 60000}]}]
+                           "last_tx": "2026-11-03", "filed": "2026-11-05",
+                           "value": 50000, "holdings_after_usd": 300000, "pct_increase": 0.2}],
+               "points": {"role": 20, "cluster": 14}, "holdings_increase": 0.2}]
 
     def test_page_escapes_and_has_viewport(self):
         h = S.report_page(self.SAMPLE, "Heading <x>")
@@ -224,3 +226,19 @@ class ReportPageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BreakdownAndHoldingsTests(unittest.TestCase):
+    def test_new_position_and_old_payload_fallback(self):
+        usd, pct = S._holdings({"holdings_after_usd": 50000, "pct_increase": "new"})
+        self.assertEqual((usd, pct), ("$50,000", "new position"))
+        usd, pct = S._holdings({"shares": 10000, "avg_price": 5.0, "holdings_after": 60000})   # old logged signal
+        self.assertEqual((usd, pct), ("$300,000", "+20%"))
+
+    def test_breakdown_sums_to_score_and_is_everywhere(self):
+        r = S.score_issuer(cluster_db(), "999999")
+        self.assertEqual(sum(v for _, _, v, _ in S.score_breakdown(r)), r["score"])
+        self.assertIn("Score:", S.format_alert([r]))
+        self.assertIn("Evidence basis", S.email_html([r], "h"))
+        self.assertIn("Evidence basis", S.report_page([r], "h"))
+        self.assertIn("Role +", S.breakdown_line(r))
