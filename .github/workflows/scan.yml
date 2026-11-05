@@ -16,7 +16,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [scan, track, digest, digest-week, backfill, notify-test]
+        options: [scan, scan-fresh, track, digest, digest-week, backfill, notify-test]
         default: scan
 
 concurrency:
@@ -85,6 +85,7 @@ jobs:
         run: |
           mkdir -p .state
           CMD="${{ steps.mode.outputs.cmd }}"
+          if [ "$CMD" = "scan-fresh" ]; then CMD="scan --fresh --lookback-days 7"; fi
           if [ "$CMD" = "digest-week" ]; then CMD="digest --days 7 --print"; fi
           if [ "$CMD" = "digest" ]; then CMD="digest --days 1 --print"; fi
           python -u insider_scanner.py --home .state $CMD 2>&1 | tee run.log

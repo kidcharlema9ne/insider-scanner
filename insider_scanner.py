@@ -1222,10 +1222,15 @@ def cmd_scan(args, con):
     print(f"{n} open-market purchase rows stored", file=sys.stderr)
     results = run_scoring(con, args.lookback_days, use_prices=not args.no_prices, edgar=edgar)
     new = log_signals(con, results, args.min_score)
+    if args.fresh:
+        # One-off "first full run": report every current signal, even ones already alerted before.
+        new = [r for r in results if r["score"] >= args.min_score]
+        print(f"FRESH RUN: reporting all {len(new)} current signals (dedupe bypassed)", file=sys.stderr)
     print_results(new)
     if new:
         print(f"\nCSV: {write_csv(new, Path(args.home) / 'out')}")
-        append_signal_log(new, args.signals_log)
+        if not args.fresh:
+            append_signal_log(new, args.signals_log)
         if not args.no_alert:
             alert_new(new)
 
@@ -1385,6 +1390,8 @@ def main(argv=None):
     s.add_argument("--lookback-days", type=int, default=3)
     s.add_argument("--min-score", type=float, default=CFG["alert_min_score"])
     s.add_argument("--no-prices", action="store_true")
+    s.add_argument("--fresh", action="store_true",
+                   help="one-off: report ALL current signals, ignoring the already-alerted dedupe")
     b = sub.add_parser("backfill")
     b.add_argument("--quarters", type=int, default=14)
     sub.add_parser("track")
