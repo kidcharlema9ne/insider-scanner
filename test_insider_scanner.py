@@ -6,7 +6,13 @@ import unittest
 import zipfile
 from pathlib import Path
 
+import os
+
 import insider_scanner as S
+
+# Tests must never see real alert credentials (GitHub Actions injects them as env vars).
+for _k in ("NTFY_TOPIC", "PUSHOVER_TOKEN", "PUSHOVER_USER", "GMAIL_USER", "GMAIL_APP_PASSWORD", "ALERT_EMAIL"):
+    os.environ.pop(_k, None)
 
 
 def form4(owner_cik="0001111111", owner="Jane Doe", title="Chief Financial Officer",
