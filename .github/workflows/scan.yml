@@ -31,13 +31,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT || 'M D mgd.dorsey@gmail.com' }}
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
       PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
       GMAIL_USER: ${{ secrets.GMAIL_USER }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-      ALERT_EMAIL: ${{ secrets.ALERT_EMAIL || 'mgd.dorsey@gmail.com' }}
+      ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
       SIGNALS_LOG: data/signals.jsonl
     steps:
       - uses: actions/checkout@v4
