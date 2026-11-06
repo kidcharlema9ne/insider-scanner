@@ -82,6 +82,13 @@ BULK_URL = ("https://www.sec.gov/files/structureddata/data/"
             "insider-transactions-data-sets/{y}q{q}_form345.zip")
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS filing_retries (
+    accession TEXT PRIMARY KEY, filed_at TEXT NOT NULL, url TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS alert_outbox (
+    id INTEGER PRIMARY KEY, payload TEXT NOT NULL, channels TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS filings(
   accession TEXT PRIMARY KEY, filed_at TEXT, n_purchases INTEGER);
 CREATE TABLE IF NOT EXISTS purchases(
@@ -200,19 +207,25 @@ IPO_WEAK = re.compile(r"underwrit|follow-?on offering|secondary offering|private
                       r"registered direct|offering price", re.I)
 
 
-def parse_form4(raw: str, accession: str, filed_at: str):
+def parse_form4(raw: str, accession: str, filed_at: str, *, strict=False):
     """Return a list of aggregated open-market-purchase dicts from one filing."""
     xml = extract_xml(raw)
     if not xml:
+        if strict:
+            raise ValueError("missing ownership XML")
         return []
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
+        if strict:
+            raise ValueError("invalid ownership XML")
         return []
     if _t(root, "documentType") not in (None, "4"):
         return []
     issuer = root.find("issuer")
     if issuer is None:
+        if strict:
+            raise ValueError("missing issuer")
         return []
     issuer_cik = (_t(issuer, "issuerCik") or "").lstrip("0")
     ticker = (_t(issuer, "issuerTradingSymbol") or "").upper()
@@ -221,6 +234,8 @@ def parse_form4(raw: str, accession: str, filed_at: str):
     # owners: use first as primary identity, OR the relationship flags (joint filers)
     owners = root.findall("reportingOwner")
     if not owners:
+        if strict:
+            raise ValueError("missing reporting owner")
         return []
     o0 = owners[0]
     owner_cik = (_t(o0, "reportingOwnerId/rptOwnerCik") or "").lstrip("0")
@@ -370,7 +385,11 @@ def gapfill_issuer(edgar, con, issuer_cik: str, today: dt.date, days: int = 400,
                   ARCHIVE_TXT.format(cik=int(issuer_cik), nodash=a.replace("-", ""), acc=a))
                  for a, d in missing]
         ingest(edgar, con, items, verbose=False)
-        ok, n = 1, len(items)
+        n = sum(con.execute("SELECT 1 FROM filings WHERE accession=?", (a,)).fetchone() is not None
+                for a, _, _ in items)
+        ok = int(n == len(items))
+        if not ok:
+            n = -1
     except Exception as e:                      # never let a gap-fill failure kill the scan
         print(f"  gap-fill failed for CIK {issuer_cik}: {e}", file=sys.stderr)
         ok, n = 0, -1
@@ -380,11 +399,24 @@ def gapfill_issuer(edgar, con, issuer_cik: str, today: dt.date, days: int = 400,
     return n
 
 
-def ingest(edgar, con, items, verbose=True):
+def ingest(edgar, con, items, verbose=True, recovered=None):
     n_new = 0
     for i, (acc, filed_at, url) in enumerate(items, 1):
-        r = edgar.get(url)
-        rows = parse_form4(r.text, acc, filed_at) if r is not None else []
+        try:
+            r = edgar.get(url)
+            if r is None:
+                raise ValueError("filing unavailable")
+            rows = parse_form4(r.text, acc, filed_at, strict=True)
+        except (ValueError, RuntimeError, OSError) as exc:
+            con.execute("INSERT OR REPLACE INTO filing_retries VALUES (?,?,?)", (acc, filed_at, url))
+            con.commit()
+            print(f"  queued filing {acc} for retry: {exc}", file=sys.stderr)
+            continue
+        retry = con.execute("DELETE FROM filing_retries WHERE accession=?", (acc,))
+        if retry.rowcount and recovered is not None:
+            recovered.update(row["issuer_cik"] for row in rows
+                             if row["ticker"] not in ("", "NONE", "N/A", "NA")
+                             and not row["plan10b5"] and row["value"] >= CFG["min_value_usd"])
         for row in rows:
             con.execute("""INSERT OR IGNORE INTO purchases VALUES
               (:accession,:issuer_cik,:ticker,:issuer_name,:owner_cik,:owner_name,:role,:title,
@@ -742,10 +774,10 @@ def candidates(con, lookback_days: int, today: dt.date):
         (since, CFG["min_value_usd"]))]
 
 
-def run_scoring(con, lookback_days, today=None, use_prices=True, edgar=None):
+def run_scoring(con, lookback_days, today=None, use_prices=True, edgar=None, recovered=()):
     today = today or dt.date.today()
     results = []
-    for cik in candidates(con, lookback_days, today):
+    for cik in dict.fromkeys([*candidates(con, lookback_days, today), *sorted(recovered)]):
         gap_failed = bool(edgar) and gapfill_issuer(edgar, con, cik, today) < 0
         px = price_features(
             con.execute("SELECT ticker FROM purchases WHERE issuer_cik=? LIMIT 1", (cik,)).fetchone()["ticker"],
@@ -764,7 +796,7 @@ def run_scoring(con, lookback_days, today=None, use_prices=True, edgar=None):
     return sorted(results, key=lambda r: -r["score"])
 
 
-def log_signals(con, results, min_score):
+def log_signals(con, results, min_score, channels=()):
     new = []
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     for r in results:
@@ -777,6 +809,9 @@ def log_signals(con, results, min_score):
              r["score"], r["tier"], json.dumps(r)))
         if cur.rowcount:
             new.append(r)
+    if new and channels:
+        con.execute("INSERT INTO alert_outbox(payload, channels) VALUES (?,?)",
+                    (json.dumps(new), json.dumps(channels)))
     con.commit()
     return new
 
@@ -1148,12 +1183,12 @@ def send_gmail(subject, body, html_body=None) -> bool:
 
 
 def notify(title: str, body: str, priority: str = "default", html_body: str | None = None,
-           push_body: str | None = None, url: str | None = None) -> list:
+           push_body: str | None = None, url: str | None = None, channels=None) -> list:
     """Push via ntfy (NTFY_TOPIC), Pushover, and/or email via Gmail SMTP (GMAIL_USER + GMAIL_APP_PASSWORD).
     Never raises. Returns the channels that worked."""
     sent = []
     topic = os.environ.get("NTFY_TOPIC", "").strip()
-    if topic:
+    if topic and (channels is None or "ntfy" in channels):
         try:
             import requests
             headers = {"Title": title.encode("ascii", "replace").decode(), "Priority": priority}
@@ -1168,7 +1203,7 @@ def notify(title: str, body: str, priority: str = "default", html_body: str | No
         except Exception as e:
             print(f"ntfy failed: {e}", file=sys.stderr)
     po_tok, po_usr = os.environ.get("PUSHOVER_TOKEN", "").strip(), os.environ.get("PUSHOVER_USER", "").strip()
-    if po_tok and po_usr:
+    if po_tok and po_usr and (channels is None or "pushover" in channels):
         try:
             import requests
             po = {"token": po_tok, "user": po_usr, "title": title[:240],
@@ -1185,7 +1220,7 @@ def notify(title: str, body: str, priority: str = "default", html_body: str | No
             body = f"{body}\n\nFull report: {url}"
             if html_body:
                 html_body += f"<p><a href='{_html.escape(url)}'>Open the full report</a></p>"
-        if send_gmail(title, body, html_body):
+        if (channels is None or "email" in channels) and send_gmail(title, body, html_body):
             sent.append("email")
     except Exception as e:
         print(f"email failed: {e}", file=sys.stderr)
@@ -1207,13 +1242,13 @@ def should_alert_failure(con, key, hours=None, now=None) -> bool:
     return True
 
 
-def alert_new(new):
+def alert_new(new, **delivery):
     """One alert for a batch of new signals: full detail by email, compact by push."""
     top = max(r["score"] for r in new)
     title = f"Insider buys: {len(new)} new signal(s), top {max(new, key=lambda r: r['score'])['ticker']} ({top:.0f})"
     url = publish_report(new, title)
     return notify(title, format_alert(new), "high" if top >= 60 else "default",
-                  html_body=email_html(new, title), push_body=push_text(new), url=url)
+                  html_body=email_html(new, title), push_body=push_text(new), url=url, **delivery)
 
 
 def cmd_notify_test(args, con):
@@ -1298,6 +1333,30 @@ def write_csv(results, out_dir: Path):
     return p
 
 
+def configured_channels():
+    credentials = {
+        "ntfy": ("NTFY_TOPIC",),
+        "pushover": ("PUSHOVER_TOKEN", "PUSHOVER_USER"),
+        "email": ("GMAIL_USER", "GMAIL_APP_PASSWORD"),
+    }
+    return [channel for channel, names in credentials.items()
+            if all(os.environ.get(name, "").strip() for name in names)]
+
+
+def deliver_pending_alerts(con):
+    for row in con.execute("SELECT * FROM alert_outbox ORDER BY id").fetchall():
+        channels = json.loads(row["channels"])
+        sent = alert_new(json.loads(row["payload"]), channels=channels)
+        accepted = {"ntfy" if channel == "ntfy+email" else channel for channel in sent}
+        remaining = [channel for channel in channels if channel not in accepted]
+        if remaining:
+            con.execute("UPDATE alert_outbox SET channels=? WHERE id=?",
+                        (json.dumps(remaining), row["id"]))
+        else:
+            con.execute("DELETE FROM alert_outbox WHERE id=?", (row["id"],))
+        con.commit()
+
+
 def cmd_scan(args, con):
     edgar = Edgar(args.user_agent)
     restore_signals(con, args.signals_log)
@@ -1310,12 +1369,17 @@ def cmd_scan(args, con):
             today - dt.timedelta(days=k) for k in range(args.daily_days)]
         for day in days:
             items += discover_daily(edgar, con, day)
+    items.extend(tuple(row) for row in con.execute(
+        "SELECT accession, filed_at, url FROM filing_retries WHERE accession NOT IN (SELECT accession FROM filings)"))
     items = [x for x in items if not (x[0] in seen or seen.add(x[0]))]
     print(f"{len(items)} new Form 4 filings to parse", file=sys.stderr)
-    n = ingest(edgar, con, items)
+    recovered = set()
+    n = ingest(edgar, con, items, recovered=recovered)
     print(f"{n} open-market purchase rows stored", file=sys.stderr)
-    results = run_scoring(con, args.lookback_days, use_prices=not args.no_prices, edgar=edgar)
-    new = log_signals(con, results, args.min_score)
+    results = run_scoring(con, args.lookback_days, use_prices=not args.no_prices, edgar=edgar,
+                          recovered=recovered)
+    channels = configured_channels() if not (args.no_alert or args.fresh) else []
+    new = log_signals(con, results, args.min_score, channels=channels)
     if args.fresh:
         # One-off "first full run": report every current signal, even ones already alerted before.
         new = [r for r in results if r["score"] >= args.min_score]
@@ -1325,8 +1389,10 @@ def cmd_scan(args, con):
         print(f"\nCSV: {write_csv(new, Path(args.home) / 'out')}")
         if not args.fresh:
             append_signal_log(new, args.signals_log)
-        if not args.no_alert:
+        if args.fresh and not args.no_alert:
             alert_new(new)
+    if not args.no_alert:
+        deliver_pending_alerts(con)
 
 
 def cmd_report(args, con):
@@ -1511,3 +1577,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

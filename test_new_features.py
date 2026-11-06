@@ -138,6 +138,20 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("Roe Richard", body)
         self.assertIn("<table", html_body)
 
+    def test_pending_alert_retries_only_failed_channel(self):
+        c = cluster_db()
+        r = S.score_issuer(c, "999999")
+        channels = ["pushover", "email"]
+        self.assertEqual(S.log_signals(c, [r], 0, channels=channels), [r])
+        with m.patch.object(S, "alert_new", side_effect=[["email"], ["pushover"]]) as alert:
+            S.deliver_pending_alerts(c)
+            self.assertEqual(S.log_signals(c, [r], 0, channels=channels), [])
+            S.deliver_pending_alerts(c)
+            S.deliver_pending_alerts(c)
+        self.assertEqual([call.kwargs["channels"] for call in alert.call_args_list],
+                         [channels, ["pushover"]])
+        self.assertIsNone(c.execute("SELECT * FROM alert_outbox").fetchone())
+
     def test_gmail_message_is_multipart_html(self):
         env = dict(NO_CHANNELS, GMAIL_USER="me@gmail.com", GMAIL_APP_PASSWORD="pw", ALERT_EMAIL="me@gmail.com")
         with m.patch.dict(os.environ, env), m.patch("smtplib.SMTP_SSL") as smtp:
@@ -269,3 +283,4 @@ class BreakdownAndHoldingsTests(unittest.TestCase):
         self.assertIn("Evidence basis", S.email_html([r], "h"))
         self.assertIn("Evidence basis", S.report_page([r], "h"))
         self.assertIn("Role +", S.breakdown_line(r))
+

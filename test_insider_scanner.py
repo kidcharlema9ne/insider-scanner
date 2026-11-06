@@ -349,13 +349,30 @@ class GapFillTests(unittest.TestCase):
     def test_gapfill_pulls_missing_forms_once(self):
         c = db()
         url = S.ARCHIVE_TXT.format(cik=999999, nodash="000000000126000012", acc="0000000001-26-000012")
-        e = self._fake({url: form4(rows=[("P", "A", 1000, 5, "2026-09-01", 5000)])})
+        empty_url = S.ARCHIVE_TXT.format(cik=999999, nodash="000000000126000010", acc="0000000001-26-000010")
+        e = self._fake({url: form4(rows=[("P", "A", 1000, 5, "2026-09-01", 5000)]),
+                        empty_url: form4(rows=[])})
         n = S.gapfill_issuer(e, c, "999999", dt.date(2026, 11, 5))
         self.assertEqual(n, 2)                      # two Form 4s missing, one parsed to a purchase
         self.assertEqual(c.execute("SELECT COUNT(*) c FROM purchases").fetchone()["c"], 1)
         calls = len(e.calls)
         self.assertEqual(S.gapfill_issuer(e, c, "999999", dt.date(2026, 11, 6)), 0)   # rechecked only after 30d
         self.assertEqual(len(e.calls), calls)
+
+    def test_unavailable_filing_can_be_retried(self):
+        c = db()
+        item = ("0000000001-26-000010", "2026-11-01T00:00:00", "archive")
+        for response in (None, "<ownershipDocument>bad XML</broken></ownershipDocument>"):
+            e = self._fake({item[2]: response})
+            self.assertEqual(S.ingest(e, c, [item]), 0)
+            self.assertIsNone(c.execute("SELECT * FROM filings").fetchone())
+        queued = tuple(c.execute("SELECT * FROM filing_retries").fetchone())
+        self.assertEqual(queued, item)
+        e = self._fake({item[2]: form4(rows=[("P", "A", 10000, 5, "2026-11-01", 50000)])})
+        recovered = set()
+        self.assertEqual(S.ingest(e, c, [queued], recovered=recovered), 1)
+        self.assertEqual(recovered, {"999999"})
+        self.assertIsNone(c.execute("SELECT * FROM filing_retries").fetchone())
 
     def test_gapfill_failure_is_flagged_not_fatal(self):
         c = db()
@@ -453,3 +470,4 @@ class ScanPlumbingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
