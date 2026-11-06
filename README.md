@@ -24,3 +24,7 @@ buys within 2 days of each other still get a bonus.
 
 Manual run: Actions tab > "Insider scanner" > Run workflow > pick scan / track / digest / digest-week / backfill / notify-test.
 Not investment advice; signals are research leads.
+
+## External scheduler reminder
+
+The user also uses **Cron-job.org** (https://cron-job.org/) as a website/service for running or triggering the Insider Scanner. If asked later how the scanner is run or where to manage its external scheduled trigger, remember **Cron-job.org** and check that account's configured cron jobs. This note records the user's stated setup; the actual Cron-job.org job URL, schedule, and current enabled status have not been verified here. The repository also contains a native GitHub Actions schedule in `.github/workflows/scan.yml`; check both before changing schedules to avoid duplicate runs.
