@@ -27,6 +27,7 @@ import datetime as dt
 import html as _html
 import io
 import json
+import math
 import os
 import re
 import smtplib
@@ -779,9 +780,15 @@ def run_scoring(con, lookback_days, today=None, use_prices=True, edgar=None, rec
     results = []
     for cik in dict.fromkeys([*candidates(con, lookback_days, today), *sorted(recovered)]):
         gap_failed = bool(edgar) and gapfill_issuer(edgar, con, cik, today) < 0
-        px = price_features(
-            con.execute("SELECT ticker FROM purchases WHERE issuer_cik=? LIMIT 1", (cik,)).fetchone()["ticker"],
-            today) if use_prices else None
+        px = None
+        if use_prices:
+            ticker = con.execute(
+                "SELECT ticker FROM purchases WHERE issuer_cik=? LIMIT 1", (cik,)
+            ).fetchone()["ticker"]
+            px = price_features(ticker, today)
+            if px and not math.isfinite(px["adv20"]):
+                print(f"  skip {ticker} ({cik}): 20-day dollar volume unavailable", file=sys.stderr)
+                continue
         if px and px.get("n_days", 999) < MIN_HISTORY_DAYS:
             print(f"  skip {cik}: only {px['n_days']} trading days of history (recent IPO)", file=sys.stderr)
             continue
