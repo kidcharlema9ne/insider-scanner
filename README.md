@@ -10,6 +10,15 @@ Files: `insider_scanner.py` (code) - `test_insider_scanner.py` + `test_new_featu
 `.github/workflows/scan.yml` (schedule) - `data/signals.jsonl` (every signal ever raised; lets the
 database be rebuilt if GitHub's cache is lost).
 
+## Alert rule (changed Nov 10 2026): the research rule
+
+Scans now alert only on the rule from the insider-buying-research study (repo `insider-buying-research`; D-057, D-064, D-065, D-066 and Entries 36, 37, 41, 66, 67):
+four or more different officers or directors (CEO, CFO, other officers, directors; not 10% owners or funds) bought in the open market within the 15 trading sessions before the entry open and their filings are already public; entry is the next regular open after the filing that makes four; the stock must trade at least $3M a day (15-session average); 10b5-1, automatic/dividend-reinvestment/ESPP, IPO/underwriter buys and plan-like same-date-same-price buying (D-064) are left out; after an event the issuer is ignored for 21 sessions (D-065).
+
+Every qualifying cluster is pushed with a **score of 0 to 4**, one point each (a placeholder, not fitted): no CEO and no CFO among the buyers; Nasdaq (ONEQ) lagging SPY by 1.95 points or more over 63 sessions; stock down 15+ ATR over 12 months; stock down 50%+ from its 12-month closing high. A "?" means the data for that condition was unavailable. Score 3 or 4 is sent at Pushover high priority. The research log's sealed-year test (Entry 93) failed, so this is a lead being watched, not a proven edge.
+
+Set `ALERT_RULE: legacy` in `.github/workflows/scan.yml` (or run with `--rule legacy`) to go back to the original tier A/B/C scorer. Tests: `python -m unittest test_insider_scanner test_new_features test_research_rule`.
+
 Secrets (repo Settings > Secrets and variables > Actions): any of `NTFY_TOPIC`, `PUSHOVER_TOKEN` + `PUSHOVER_USER`,
 `GMAIL_USER` + `GMAIL_APP_PASSWORD` (+ optional `ALERT_EMAIL`), `SEC_USER_AGENT`. Every channel that is set is used.
 Each alert lists every buyer: name, position, $ bought, buy dates, filing date, estimated $ holdings afterwards and the % the buy added to prior holdings (no share counts), plus a score-breakdown table (factor, trigger, points, research basis).
