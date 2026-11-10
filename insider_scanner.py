@@ -865,8 +865,10 @@ BASIS = {
 def score_breakdown(r):
     """-> [(factor, what triggered it, points, evidence basis)] explaining the score."""
     if r.get("rule") == "research":
-        return [(RULE_FACTORS[k][0], _research_detail(k, r), r["points"].get(k) or 0, RULE_FACTORS[k][1])
-                for k in RULE_FACTORS]
+        rows = [("Base: the cluster rule", "Four or more officers/directors bought", 1,
+                 "Required for any alert (D-057)")]
+        return rows + [(RULE_FACTORS[k][0], _research_detail(k, r), RULE_WEIGHTS[k] * (r["points"].get(k) or 0),
+                        RULE_FACTORS[k][1] + f"; worth {RULE_WEIGHTS[k]} point(s)") for k in RULE_FACTORS]
     pts = r.get("points") or {}
     hi = r.get("holdings_increase")
     hi_s = "n/a" if hi is None else ("new position" if hi == "new/>100%" else f"+{hi:.0%}")
@@ -930,23 +932,52 @@ def format_alert(new, limit=3800) -> str:
     return text if len(text) <= limit else text[:limit - 20] + "\n...(truncated)"
 
 
+def _plain(t: str) -> str:
+    return re.sub(r"<[^>]+>", "", t)
+
+
+def push_research(new, limit=1000, html=True) -> str:
+    """Pushover message for research-rule signals. With html=True it uses Pushover's own tags (bold, colour)."""
+    e = _html.escape if html else (lambda x: x)
+    b = (lambda x: f"<b>{x}</b>") if html else (lambda x: x)
+
+    def block(r, detail):
+        c = r.get("context") or {}
+        colour = "#1a7f37" if r["score"] >= RULE["high_priority_score"] else "#b26a00" if r["score"] >= 4 else "#6b7280"
+        head = f"Score {r['score']} of {r.get('score_max', SCORE_MAX)}"
+        if r.get("checked", 4) < 4:
+            head += f" ({4 - r['checked']} not checked)"
+        head = f'<font color="{colour}"><b>{head}</b></font>' if html else head
+        lines = [f"{b(e(r['ticker']))}  {e(str(r.get('issuer', ''))[:30])}", head,
+                 f"{r['n_insiders']} officers/directors bought ${r['total_value']:,}",
+                 f"Buy at {dt.date.fromisoformat(r['entry_date']):%a %b %d} open, hold 21 sessions"]
+        for key, name in RULE_SHORT.items():
+            p = r["points"].get(key)
+            mark = "\u2705" if p else ("\u2754" if p is None else "\u25ab\ufe0f")
+            pts = f" +{RULE_WEIGHTS[key]}" if p else ""
+            lines.append(f"{mark} {e(name)}{e(_research_value(key, r)) if detail else ''}{pts}")
+        if detail:
+            if c.get("adv15") is not None:
+                lines.append(f"Volume ${c['adv15'] / 1e6:.1f}M/day, last ${c['last']:.2f}")
+            for x in (r.get("buyers") or [])[:4]:
+                lines.append(f"\u2022 {e(x['name'].title()[:24])} ({e(x['title'][:22])}) {_money(x['value'])}")
+        return "\n".join(lines)
+
+    tries = ([(True, 1)] if len(new) == 1 else []) + [(False, min(len(new), 5)), (False, 3), (False, 2), (False, 1)]
+    for detail, n in tries:
+        text = "\n\n".join(block(r, detail) for r in new[:n])
+        if len(text) <= limit:
+            return text
+    return text[:limit - 3] + "..."
+
+
 def push_text(new, limit=1000) -> str:
     """Compact version for Pushover (1,024-character message cap)."""
     lines = []
     for r in new[:5]:
         c = r.get("context") or {}
         if r.get("rule") == "research":
-            lines.append(f"{r['ticker']}: {research_headline(r)} - {r['n_insiders']} officers/directors bought "
-                         f"${r['total_value']:,}")
-            lines.append(f"Entry {dt.date.fromisoformat(r['entry_date']):%a %b %d} open, 21-session hold")
-            for key, name in RULE_SHORT.items():
-                p = r["points"].get(key)
-                lines.append(f"{'+1' if p else ('?' if p is None else ' 0')} {name}{_research_value(key, r)}")
-            if c.get("adv15") is not None:
-                lines.append(f"Avg daily volume ${c['adv15'] / 1e6:.1f}M, last ${c['last']:.2f}")
-            for b in (r.get("buyers") or [])[:4]:
-                lines.append(f" {b['name']} ({b['title']}) {_money(b['value'])}")
-            continue
+            return push_research(new, limit, html=True)
         lines.append(f"{r['tier']}{r['score']:.0f} {r['ticker']} {r['n_insiders']} insider(s) ${r['total_value']:,}"
                      + (f" ADV${c['adv20_usd'] / 1e6:.1f}M" if c.get("adv20_usd") is not None else ""))
         for b in (r.get("buyers") or [])[:4]:
@@ -1056,12 +1087,12 @@ RESEARCH_NOTE = (
     "<details open><summary>About this rule</summary>"
     "<p>An alert fires when four or more different officers or directors have bought with their own money "
     "(open market, not under a 10b5-1 plan, not automatic or dividend-reinvestment buys) within the 15 trading "
-    "sessions before the entry open, and the stock trades at least $3M a day. The score adds one point for each of four "
-    "conditions: no CEO or CFO among the buyers, the Nasdaq lagging the S&amp;P 500 over 63 sessions, the stock down "
-    "15 or more ATR over 12 months, and the stock down 50% or more from its 12-month high. A question mark means that "
-    "condition could not be checked.</p>"
+    "sessions before the entry open, and the stock trades at least $3M a day. The score runs 1 to 10: 1 for meeting the rule, "
+    "plus 3 for the Nasdaq lagging the S&amp;P 500 over 63 sessions, 3 for the stock down 15 or more ATR over 12 months, "
+    "2 for the stock down 50% or more from its 12-month high, and 1 for no CEO or CFO among the buyers. The points are the "
+    "development-year contributions (Entry 67) rounded; a question mark means that condition could not be checked.</p>"
     "<p><b>Status:</b> these are leads from the 2006-2020 development years. The one-time test on 2021-2025 "
-    "(research log Entry 93) failed, so this is not a proven edge. Equal one-point weights are a placeholder, not fitted. "
+    "(research log Entry 93) failed, so this is not a proven edge. The weights are post hoc, not tested out of sample. "
     "ATR is the stock's average daily price range over 14 sessions.</p></details>")
 
 
@@ -1240,7 +1271,7 @@ def send_gmail(subject, body, html_body=None) -> bool:
 
 
 def notify(title: str, body: str, priority: str = "default", html_body: str | None = None,
-           push_body: str | None = None, url: str | None = None, channels=None) -> list:
+           push_body: str | None = None, url: str | None = None, channels=None, push_html: bool = False) -> list:
     """Push via ntfy (NTFY_TOPIC), Pushover, and/or email via Gmail SMTP (GMAIL_USER + GMAIL_APP_PASSWORD).
     Never raises. Returns the channels that worked."""
     sent = []
@@ -1265,6 +1296,8 @@ def notify(title: str, body: str, priority: str = "default", html_body: str | No
             import requests
             po = {"token": po_tok, "user": po_usr, "title": title[:240],
                   "message": (push_body or body)[:1000], "priority": 1 if priority == "high" else 0}
+            if push_html:
+                po["html"] = 1
             if url:
                 po.update({"url": url, "url_title": "Open full report"})
             r = requests.post("https://api.pushover.net/1/messages.json", timeout=20, data=po)
@@ -1304,14 +1337,15 @@ def alert_new(new, **delivery):
     top = max(r["score"] for r in new)
     best = max(new, key=lambda r: r["score"])
     if all(r.get("rule") == "research" for r in new):
-        title = (f"Insider cluster {best['ticker']}: score {top} of 4" if len(new) == 1 else
-                 f"Insider clusters: {len(new)} new, top {best['ticker']} (score {top} of 4)")
+        title = (f"{best['ticker']} - insider score {top} of {SCORE_MAX}" if len(new) == 1 else
+                 f"{len(new)} insider clusters, top {best['ticker']} (score {top} of {SCORE_MAX})")
         priority = "high" if top >= RULE["high_priority_score"] else "default"
     else:
         title = f"Insider buys: {len(new)} new signal(s), top {best['ticker']} ({top:.0f})"
         priority = "high" if top >= 60 else "default"
     url = publish_report(new, title)
     return notify(title, format_alert(new), priority,
+                  push_html=all(r.get("rule") == "research" for r in new),
                   html_body=email_html(new, title), push_body=push_text(new), url=url, **delivery)
 
 
@@ -1410,8 +1444,14 @@ RULE = {
     "nasdaq_lag_cut": -0.0195,       # Nasdaq (ONEQ) 63-session move minus SPY's at or below this (Entry 41 cut)
     "fall_atr": -15.0,               # 252-session close change in ATR units at or below this (Entry 67)
     "drawdown": 0.50,                # down at least 50% from the highest close of the prior 252 sessions (Entry 66)
-    "high_priority_score": 3,        # Pushover high priority at this score or above
+    "high_priority_score": 7,        # Pushover high priority at this score or above
 }
+# Score 1 to 10 = 1 (the cluster rule itself) + the points below. Points are the development-year
+# regression coefficients of Entry 67 (no CEO/CFO +0.12, Nasdaq lag +0.50, 15-ATR fall +0.36, 50% drawdown +0.26
+# ATR over SPY) scaled so the maximum is 10 and rounded to whole points. Post hoc, development years only;
+# the 2021-2025 test failed (Entry 93).
+RULE_WEIGHTS = {"no_ceo_cfo": 1, "nasdaq_lag": 3, "deep_fall": 3, "drawdown": 2}
+SCORE_MAX = 1 + sum(RULE_WEIGHTS.values())
 RULE_ROLES = ("CEO", "CFO", "OFFICER", "DIRECTOR")      # 10% owners and "other" holders do not count
 NYSE_HOLIDAYS = {dt.date(*d) for d in [
     (2025, 1, 1), (2025, 1, 9), (2025, 1, 20), (2025, 2, 17), (2025, 4, 18), (2025, 5, 26), (2025, 6, 19),
@@ -1644,15 +1684,16 @@ def _bars(cache, bars_fn, ticker, today):
 
 # ---- scoring ------------------------------------------------------------
 def score_research(event, feats):
-    """-> (points {factor: 1/0/None}, score, how many factors could be checked). None = could not check."""
+    """-> (flags {factor: 1/0/None}, score 1-10, how many factors could be checked). None = could not check
+    and earns nothing. The score starts at 1 because the cluster rule itself was met."""
     f = feats or {}
     roles = {r["role"] for r in event["counted"]}
     pts = {"no_ceo_cfo": 0 if roles & {"CEO", "CFO"} else 1}
     pts["nasdaq_lag"] = None if f.get("lead63") is None else int(f["lead63"] <= RULE["nasdaq_lag_cut"])
     pts["deep_fall"] = None if f.get("fall_atr") is None else int(f["fall_atr"] <= RULE["fall_atr"])
     pts["drawdown"] = None if f.get("drawdown") is None else int(f["drawdown"] >= RULE["drawdown"])
-    known = [v for v in pts.values() if v is not None]
-    return pts, sum(known), len(known)
+    score = 1 + sum(RULE_WEIGHTS[k] * v for k, v in pts.items() if v)
+    return pts, score, sum(v is not None for v in pts.values())
 
 
 def _research_detail(key, r):
@@ -1689,7 +1730,7 @@ def build_research_result(event, feats, ticker, issuer, issuer_cik, flags=()):
         stats.append(("Last close", f"${f['last']:.2f}"))
     return {
         "rule": "research", "issuer_cik": issuer_cik, "ticker": ticker, "issuer": issuer,
-        "score": score, "score_max": 4, "checked": checked, "tier": "R", "points": pts,
+        "score": score, "score_max": SCORE_MAX, "checked": checked, "tier": "R", "points": pts,
         "n_insiders": len(owners), "tight_cluster": False, "lead_role": lead_rows[0]["role"],
         "lead_owner": lead_rows[0]["owner_name"], "lead_title": lead_rows[0]["title"],
         "total_value": round(sum(r["value"] for r in rows)), "holdings_increase": None,
@@ -1701,11 +1742,11 @@ def build_research_result(event, feats, ticker, issuer, issuer_cik, flags=()):
 
 
 def _research_value(key, r) -> str:
-    """Short measured value for the push line, e.g. ' (-17.2)'. Empty when the factor could not be checked."""
+    """Short measured value for the push line, e.g. ': -17.2 ATR'. Empty when the factor could not be checked."""
     c = r.get("context") or {}
     v = {"nasdaq_lag": ("lead63", lambda x: f"{x * 100:+.1f} pts"), "deep_fall": ("fall_atr", lambda x: f"{x:+.1f} ATR"),
          "drawdown": ("drawdown", lambda x: f"-{x:.0%}")}.get(key)
-    return f" ({v[1](c[v[0]])})" if v and c.get(v[0]) is not None else ""
+    return f": {v[1](c[v[0]])}" if v and c.get(v[0]) is not None else ""
 
 
 def research_lines(r):
@@ -1713,7 +1754,7 @@ def research_lines(r):
     out = []
     for key, (name, _) in RULE_FACTORS.items():
         p = r["points"].get(key)
-        out.append(f"{'+1' if p else ('?' if p is None else ' 0')}  {name}")
+        out.append(f"{'+%d' % RULE_WEIGHTS[key] if p else ('?' if p is None else ' 0')}  {name} (worth {RULE_WEIGHTS[key]})")
     return out
 
 
@@ -1770,8 +1811,8 @@ def run_research(con, lookback_days, today=None, use_prices=True, edgar=None, re
 
 RULE_SHORT = {
     "no_ceo_cfo": "No CEO or CFO among buyers",
-    "nasdaq_lag": "Nasdaq lagging S&P 500 (63 days)",
-    "deep_fall": "Down 15+ ATR over 12 months",
+    "nasdaq_lag": "Nasdaq lagging S&P 500, 63 days",
+    "deep_fall": "Down 15+ ATR in 12 months",
     "drawdown": "Down 50%+ from 12-month high",
 }
 
@@ -1901,7 +1942,7 @@ def research_track_rows(con):
                 """SELECT s.payload p, o.ret, o.spy_ret FROM outcomes o JOIN signals s ON s.id=o.signal_id
                    WHERE o.horizon=? AND o.spy_ret IS NOT NULL""", (hz,)).fetchall():
             p = json.loads(r["p"])
-            if p.get("rule") == "research":
+            if p.get("rule") == "research" and p.get("score_max") == SCORE_MAX:
                 by.setdefault(p["score"], []).append(r["ret"] - r["spy_ret"])
         for sc in sorted(by):
             out.append((sc, hz, len(by[sc]), statistics.mean(by[sc]), statistics.median(by[sc]),
@@ -1915,7 +1956,7 @@ def track_text(con) -> str:
         lines.append(f"{tier:4} {hz:>5}d {n:>4} {mean:>+8.1%} {med:>+8.1%} {win:>6.0%}")
     rr = research_track_rows(con)
     if rr:
-        lines += ["", "Research rule, by score (0-4):", f"{'Score':5} {'Horizon':>7} {'N':>4} {'MeanExc':>8} {'MedExc':>8} {'Win%':>6}"]
+        lines += ["", "Research rule, by score (1-10):", f"{'Score':5} {'Horizon':>7} {'N':>4} {'MeanExc':>8} {'MedExc':>8} {'Win%':>6}"]
         lines += [f"{sc:<5} {hz:>5}d {n:>4} {mean:>+8.1%} {med:>+8.1%} {win:>6.0%}" for sc, hz, n, mean, med, win in rr]
     return "\n".join(lines)
 

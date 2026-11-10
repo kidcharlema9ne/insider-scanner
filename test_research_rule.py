@@ -156,7 +156,7 @@ class ScoreTests(unittest.TestCase):
         self.assertGreater(f["drawdown"], 0.5)
         self.assertLess(f["lead63"], -0.0195)
         pts, score, checked = S.score_research(self.ev, f)
-        self.assertEqual((score, checked), (4, 4))
+        self.assertEqual((score, checked), (10, 4))
         self.assertEqual(pts, {"no_ceo_cfo": 1, "nasdaq_lag": 1, "deep_fall": 1, "drawdown": 1})
 
     def test_ceo_removes_the_no_ceo_cfo_point(self):
@@ -169,7 +169,7 @@ class ScoreTests(unittest.TestCase):
     def test_flat_stock_scores_only_the_no_ceo_cfo_point(self):
         stock, spy, oneq = bars(), bars(), bars()
         pts, score, checked = S.score_research(self.ev, self.feats(stock, spy, oneq))
-        self.assertEqual((score, checked), (1, 4))
+        self.assertEqual((score, checked), (2, 4))      # 1 for the rule + 1 for no CEO/CFO
         self.assertEqual(pts["nasdaq_lag"], 0)
 
     def test_fall_boundary_is_in_atr_units_not_percent(self):
@@ -183,7 +183,7 @@ class ScoreTests(unittest.TestCase):
     def test_missing_price_data_is_not_scored_and_says_so(self):
         pts, score, checked = S.score_research(self.ev, S.research_features([], [], [], self.ev["entry"]))
         self.assertEqual(pts["deep_fall"], None)
-        self.assertEqual((score, checked), (1, 1))
+        self.assertEqual((score, checked), (2, 1))
         r = S.build_research_result(self.ev, None, "ACME", "ACME Corp", "999999", ["prices_not_checked"])
         self.assertIn("3 could not be checked", S.research_headline(r))
 
@@ -215,11 +215,11 @@ class EndToEndTests(unittest.TestCase):
         res = S.run_research(self.c, 3, today=D(2026, 11, 10), bars_fn=self.fake_bars)
         self.assertEqual(len(res), 1)
         r = res[0]
-        self.assertEqual((r["score"], r["rule"], r["n_insiders"]), (4, "research", 4))
+        self.assertEqual((r["score"], r["rule"], r["n_insiders"]), (10, "research", 4))
         text = S.push_text(res)
         self.assertLessEqual(len(text), 1000)
-        self.assertIn("score 4 of 4".lower(), text.lower())
-        self.assertIn("Entry Wed Nov 11 open", text)
+        self.assertIn("score 10 of 10", text.lower())
+        self.assertIn("Buy at Wed Nov 11 open", text)
         for letter_code in ("R1", "D1", "N)", "T20"):
             self.assertNotIn(letter_code, text)                     # plain words only, no shorthand labels
         self.assertIn("Down 50%+ from 12-month high", text)
@@ -248,18 +248,18 @@ class EndToEndTests(unittest.TestCase):
                 m.patch.object(S, "notify", side_effect=lambda t, b, p, **k: sent.update(t=t, p=p, push=k["push_body"]) or ["pushover"]):
             S.alert_new(res)
             self.assertEqual(sent["p"], "high")
-            self.assertEqual(sent["t"], "Insider cluster ACME: score 4 of 4")
-            low = [dict(res[0], score=1)]
+            self.assertEqual(sent["t"], "ACME - insider score 10 of 10")
+            low = [dict(res[0], score=3)]
             S.alert_new(low)
             self.assertEqual(sent["p"], "default")
 
     def test_report_page_and_email_render_for_research_results(self):
         res = S.run_research(self.c, 3, today=D(2026, 11, 10), bars_fn=self.fake_bars)
         page = S.report_page(res, "t")
-        self.assertIn("Score 4 of 4", page)
+        self.assertIn("Score 10 of 10", page)
         self.assertIn("About this rule", page)
         self.assertIn("Entry 93", page)
-        self.assertIn("Score 4 of 4", S.email_html(res, "t"))
+        self.assertIn("Score 10 of 10", S.email_html(res, "t"))
         self.assertIn("Stock down 15+ ATR", S.format_alert(res))
         S.write_csv(res, __import__("pathlib").Path(__import__("tempfile").mkdtemp()))
 
@@ -272,6 +272,17 @@ class EndToEndTests(unittest.TestCase):
         fresh = db()
         self.assertEqual(S.restore_signals(fresh, path), 1)
         self.assertEqual(json.loads(fresh.execute("SELECT payload FROM signals").fetchone()["payload"])["rule"], "research")
+
+    def test_weights_sum_to_ten_and_push_uses_pushover_html(self):
+        self.assertEqual(S.SCORE_MAX, 10)
+        res = S.run_research(self.c, 3, today=D(2026, 11, 10), bars_fn=self.fake_bars)
+        text = S.push_text(res)
+        self.assertIn("<b>ACME</b>", text)
+        self.assertIn("\u2705 Nasdaq lagging S&amp;P 500, 63 days: -2.6 pts +3", text)
+        self.assertEqual(S.push_research(res, html=False).count("<"), 0)
+        many = [dict(res[0], ticker=f"T{i}") for i in range(5)]
+        self.assertLessEqual(len(S.push_text(many)), 1000)
+        self.assertEqual(S.push_text(many[:3]).count("<b>T"), 3)         # several signals: all are shown, compactly
 
     def test_notify_test_command_runs(self):
         import argparse
