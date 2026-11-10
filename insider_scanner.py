@@ -1544,6 +1544,7 @@ def research_event(con, issuer_cik, today=None):
     flagged = routine_rows(rows)
     cand = [r for r in rows if r["role"] in RULE_ROLES and not ENTITY_RE.search(r["owner_name"] or "")
             and _rowkey(r) not in flagged]
+    best = 0
     for t in sorted({filed_datetime(r) for r in cand}):
         entry = entry_session(t)
         lo = sessions_before(entry, RULE["window_sessions"])[0].isoformat()
@@ -1551,13 +1552,17 @@ def research_event(con, issuer_cik, today=None):
         owners: dict = {}
         for r in counted:
             owners.setdefault(family_key(r["owner_name"], r["owner_cik"]), []).append(r)
+        best = max(best, len(owners))
         if len(owners) >= RULE["min_buyers"]:
             if issuer_is_routine(con, issuer_cik, t.date()):
                 return None, "routine issuer (D-064 b)"
             done = [r for r in counted if filed_datetime(r) == t]
             return {"entry": entry, "window_start": lo, "completed_at": t, "owners": owners, "counted": counted,
                     "accession": max(r["accession"] for r in done), "routine_left_out": len(flagged)}, None
-    return None, "fewer than four officers/directors"
+    left = len(flagged)
+    return None, (f"only {best} distinct officers/directors in the window (needs 4)"
+                  + (f"; {left} plan-like purchase(s) left out (D-064)" if left else "")) if cand else \
+        "no officer/director purchases that count (10% owners, funds, plan or automatic buys do not)"
 
 
 def in_prior_hold(con, issuer_cik, entry: dt.date, accession: str) -> bool:
@@ -1734,6 +1739,8 @@ def run_research(con, lookback_days, today=None, use_prices=True, edgar=None, re
         gap_failed = bool(edgar) and gapfill_issuer(edgar, con, cik, today) < 0
         event, why = research_event(con, cik, today)
         if not event:
+            tk = con.execute("SELECT ticker FROM purchases WHERE issuer_cik=? LIMIT 1", (cik,)).fetchone()
+            print(f"  no event {tk['ticker'] if tk else cik}: {why}", file=sys.stderr)
             continue
         if event["completed_at"].date().isoformat() < since:
             continue                              # the fourth buyer filed before this scan's look-back: not new
