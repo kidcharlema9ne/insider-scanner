@@ -204,6 +204,9 @@ def extract_xml(raw: str):
 
 IPO_STRONG = re.compile(r"initial public offering|\bIPO\b|directed share|public offering price|"
                         r"concurrent private placement|purchased from the underwriters?", re.I)
+# Non-discretionary buys (automatic plans, dividend reinvestment, employee stock purchase plans) are excluded,
+# as in the research study (insider-buying-research: form4_parser.py, sec_bulk_importer.py).
+NON_DISCRETIONARY = re.compile(r"automatic|dividend reinvest|employee stock purchase|\bESPP\b", re.I)
 IPO_WEAK = re.compile(r"underwrit|follow-?on offering|secondary offering|private placement|"
                       r"registered direct|offering price", re.I)
 
@@ -273,8 +276,8 @@ def parse_form4(raw: str, accession: str, filed_at: str, *, strict=False):
         fn_text = " ".join(footnotes.get(f.get("id"), "") for f in tx.iter("footnoteId"))
         fn_plan = bool(re.search(r"10b5-?1", fn_text, re.I)) and not re.search(
             r"\b(not|no)\b.{0,60}10b5-?1", fn_text, re.I)
-        if doc_is_ipo or IPO_WEAK.search(fn_text):
-            continue                  # IPO / directed-share / placement purchase, not open-market
+        if doc_is_ipo or IPO_WEAK.search(fn_text) or NON_DISCRETIONARY.search(fn_text):
+            continue                  # IPO / directed-share / placement / automatic-plan purchase, not discretionary open-market
         g = groups.setdefault(tx_date, {"shares": 0.0, "value": 0.0, "post": None, "plan": False})
         g["shares"] += shares
         g["value"] += shares * price
@@ -861,6 +864,9 @@ BASIS = {
 
 def score_breakdown(r):
     """-> [(factor, what triggered it, points, evidence basis)] explaining the score."""
+    if r.get("rule") == "research":
+        return [(RULE_FACTORS[k][0], _research_detail(k, r), r["points"].get(k) or 0, RULE_FACTORS[k][1])
+                for k in RULE_FACTORS]
     pts = r.get("points") or {}
     hi = r.get("holdings_increase")
     hi_s = "n/a" if hi is None else ("new position" if hi == "new/>100%" else f"+{hi:.0%}")
@@ -895,6 +901,14 @@ def buyer_lines(r):
 
 def signal_block(r):
     """Multi-line plain-text description of one signal."""
+    if r.get("rule") == "research":
+        lines = [f"{r['ticker']} - {research_headline(r)}: {r['n_insiders']} officers/directors bought "
+                 f"${r['total_value']:,}, fourth filing {r['latest_filed']}"
+                 + (f" [{' '.join(r['flags'])}]" if r.get("flags") else "")]
+        lines += [f"  {k}: {v}" for k, v in r.get("stats", [])]
+        lines += [f"  {x}" for x in research_lines(r)]
+        lines.append(f"  Buy dates {r['window_start']} to {r['latest_tx']}")
+        return "\n".join(lines + buyer_lines(r))
     c = r.get("context") or {}
     extra = f" | ADV ${c['adv20_usd'] / 1e6:.1f}M" if c.get("adv20_usd") is not None else ""
     flags = f" [{' '.join(r['flags'])}]" if r.get("flags") else ""
@@ -921,12 +935,31 @@ def push_text(new, limit=1000) -> str:
     lines = []
     for r in new[:5]:
         c = r.get("context") or {}
+        if r.get("rule") == "research":
+            lines.append(f"{r['ticker']}: {research_headline(r)} - {r['n_insiders']} officers/directors bought "
+                         f"${r['total_value']:,}")
+            lines.append(f"Entry {dt.date.fromisoformat(r['entry_date']):%a %b %d} open, 21-session hold")
+            for key, name in RULE_SHORT.items():
+                p = r["points"].get(key)
+                lines.append(f"{'+1' if p else ('?' if p is None else ' 0')} {name}{_research_value(key, r)}")
+            if c.get("adv15") is not None:
+                lines.append(f"Avg daily volume ${c['adv15'] / 1e6:.1f}M, last ${c['last']:.2f}")
+            for b in (r.get("buyers") or [])[:4]:
+                lines.append(f" {b['name']} ({b['title']}) {_money(b['value'])}")
+            continue
         lines.append(f"{r['tier']}{r['score']:.0f} {r['ticker']} {r['n_insiders']} insider(s) ${r['total_value']:,}"
                      + (f" ADV${c['adv20_usd'] / 1e6:.1f}M" if c.get("adv20_usd") is not None else ""))
         for b in (r.get("buyers") or [])[:4]:
             lines.append(f" {b['name']} ({b['title']}) {_money(b['value'])} {_when(b)}")
     text = "\n".join(lines)
     return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _label(r) -> str:
+    """Short rating label: 'Score 3 of 4' for the research rule, 'Tier A, score 72' for the old scorer."""
+    if r.get("rule") == "research":
+        return research_headline(r)
+    return f"Tier {r['tier']}, score {r['score']:.0f}"
 
 
 def email_html(new, heading) -> str:
@@ -936,13 +969,14 @@ def email_html(new, heading) -> str:
         c = r.get("context") or {}
         link = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={r['issuer_cik']}&type=4"
         out.append(f"<h3 style='margin-bottom:2px'>{e(r['ticker'])} - {e(r.get('issuer', ''))} "
-                   f"<span style='color:#555'>(Tier {r['tier']}, score {r['score']:.0f})</span></h3>")
+                   f"<span style='color:#555'>({_label(r)})</span></h3>")
         meta = [f"{r['n_insiders']} insider(s)", f"{_money(r['total_value'])} total",
                 f"buys {r.get('window_start', '?')} to {r.get('latest_tx', '?')}",
                 f"latest filing {r.get('latest_filed', '?')}"]
         if c.get("adv20_usd") is not None:
             meta += [f"ADV ${c['adv20_usd'] / 1e6:.1f}M", f"{_pct(c.get('dist_52w_high'))} vs 52-wk high",
                      f"63-day {_pct(c.get('ret_63d'))}"]
+        meta += [f"{k}: {v}" for k, v in r.get("stats", [])]
         out.append("<div style='color:#333'>" + " | ".join(e(m) for m in meta) + "</div>")
         if r.get("flags"):
             out.append(f"<div style='color:#a00'>Flags: {e(', '.join(r['flags']))}</div>")
@@ -1018,6 +1052,19 @@ REPORT_HELP = (
 )
 
 
+RESEARCH_NOTE = (
+    "<details open><summary>About this rule</summary>"
+    "<p>An alert fires when four or more different officers or directors have bought with their own money "
+    "(open market, not under a 10b5-1 plan, not automatic or dividend-reinvestment buys) within the 15 trading "
+    "sessions before the entry open, and the stock trades at least $3M a day. The score adds one point for each of four "
+    "conditions: no CEO or CFO among the buyers, the Nasdaq lagging the S&amp;P 500 over 63 sessions, the stock down "
+    "15 or more ATR over 12 months, and the stock down 50% or more from its 12-month high. A question mark means that "
+    "condition could not be checked.</p>"
+    "<p><b>Status:</b> these are leads from the 2006-2020 development years. The one-time test on 2021-2025 "
+    "(research log Entry 93) failed, so this is not a proven edge. Equal one-point weights are a placeholder, not fitted. "
+    "ATR is the stock's average daily price range over 14 sessions.</p></details>")
+
+
 def _ny_time(now=None):
     now = now or dt.datetime.now(dt.timezone.utc)
     try:
@@ -1062,11 +1109,12 @@ def report_page(new, heading, now=None) -> str:
         if c.get("adv20_usd") is not None:
             stats += [("Avg daily $ volume", f"${c['adv20_usd'] / 1e6:.1f}M"),
                       ("Vs 52-week high", _pct(c.get("dist_52w_high"))), ("63-day move", _pct(c.get("ret_63d")))]
-        if c.get("last") is not None:
+        if c.get("last") is not None and not r.get("rule"):
             stats.insert(2, ("Price", f"${c['last']:.2f}"))
+        stats += r.get("stats", [])
         out.append("<div class='card'><div class='head'>"
                    f"<span class='tk'>{e(str(r['ticker']))}</span>"
-                   f"<span class='badge {badge}'>Tier {e(tier)} - score {r['score']:.0f}</span>"
+                   f"<span class='badge {badge}'>{e(_label(r))}</span>"
                    f"<span class='iss'>{e(str(r.get('issuer', '')))}</span></div>")
         if r.get("flags"):
             out.append(f"<div class='flags'>Flags: {e(', '.join(r['flags']))}</div>")
@@ -1091,6 +1139,8 @@ def report_page(new, heading, now=None) -> str:
                                  f"<td class='role'>{e(bs)}</td></tr>" for f, d, v, bs in bd) + "</table>")
         out.append(f"<a class='btn' href='{e(link)}'>All Form 4 filings on SEC.gov</a></div>")
     out.append(REPORT_HELP)
+    if any(r.get("rule") == "research" for r in new):
+        out.append(RESEARCH_NOTE)
     out.append("<footer>Research leads from public SEC Form 4 filings, not investment advice. "
                "Always check the filing yourself.</footer>")
     return _page(heading, "".join(out))
@@ -1252,29 +1302,34 @@ def should_alert_failure(con, key, hours=None, now=None) -> bool:
 def alert_new(new, **delivery):
     """One alert for a batch of new signals: full detail by email, compact by push."""
     top = max(r["score"] for r in new)
-    title = f"Insider buys: {len(new)} new signal(s), top {max(new, key=lambda r: r['score'])['ticker']} ({top:.0f})"
+    best = max(new, key=lambda r: r["score"])
+    if all(r.get("rule") == "research" for r in new):
+        title = (f"Insider cluster {best['ticker']}: score {top} of 4" if len(new) == 1 else
+                 f"Insider clusters: {len(new)} new, top {best['ticker']} (score {top} of 4)")
+        priority = "high" if top >= RULE["high_priority_score"] else "default"
+    else:
+        title = f"Insider buys: {len(new)} new signal(s), top {best['ticker']} ({top:.0f})"
+        priority = "high" if top >= 60 else "default"
     url = publish_report(new, title)
-    return notify(title, format_alert(new), "high" if top >= 60 else "default",
+    return notify(title, format_alert(new), priority,
                   html_body=email_html(new, title), push_body=push_text(new), url=url, **delivery)
 
 
 def cmd_notify_test(args, con):
-    sample = [{"tier": "A", "score": 72, "ticker": "TEST", "issuer": "Test Corp", "issuer_cik": "1",
-               "n_insiders": 2, "lead_role": "CFO", "lead_owner": "Doe Jane", "total_value": 150000,
-               "flags": [], "context": {}, "window_start": "2026-11-03", "latest_tx": "2026-11-04",
-               "latest_filed": "2026-11-05",
-               "buyers": [{"name": "Doe Jane", "role": "CFO", "title": "Chief Financial Officer",
-                           "first_tx": "2026-11-03", "last_tx": "2026-11-03", "filed": "2026-11-05",
-                           "value": 50000, "holdings_after_usd": 300000, "pct_increase": 0.2},
-                          {"name": "Roe Richard", "role": "DIRECTOR", "title": "Director",
-                           "first_tx": "2026-11-04", "last_tx": "2026-11-04", "filed": "2026-11-05",
-                           "value": 100000, "holdings_after_usd": 600000, "pct_increase": 0.2}],
-               "points": {"role": 20, "cluster": 14, "first_buy": 12}, "n_insiders": 2, "tight_cluster": False,
-               "holdings_increase": 0.2}]
-    url = publish_report(sample, "Insider scanner test (sample data)", name_hint="TEST")
+    names = [("Doe Jane", "CFO", "Chief Financial Officer"), ("Roe Richard", "DIRECTOR", "Director"),
+             ("Poe Ann", "DIRECTOR", "Director"), ("Lee Sam", "OFFICER", "EVP, Operations")]
+    rows = [{"accession": f"T-{i}", "owner_cik": str(i), "owner_name": n, "role": ro, "title": ti, "tx_date": "2026-11-04",
+             "filed_date": "2026-11-05", "filed_at": "2026-11-05T10:00:00-05:00", "shares": 10000.0, "price": 10.0 + i,
+             "value": 100000.0 + i, "post_shares": 60000.0, "ticker": "TEST", "issuer_name": "Test Corp"}
+            for i, (n, ro, ti) in enumerate(names, 1)]
+    ev = {"entry": dt.date(2026, 11, 6), "window_start": "2026-10-15", "completed_at": filed_datetime(rows[-1]),
+          "owners": {r["owner_cik"]: [r] for r in rows}, "counted": rows, "accession": "T-4"}
+    feats = {"adv15": 12_500_000.0, "last": 11.0, "atr": 0.5, "fall_atr": -17.2, "drawdown": 0.61, "lead63": -0.031}
+    rsample = [build_research_result(ev, feats, "TEST", "Test Corp", "1")]
+    url = publish_report(rsample, "Insider scanner test (sample data)", name_hint="TEST")
     print("report link:", url or "none (no GITHUB_REPOSITORY / REPORT_BASE_URL)")
-    sent = notify("Insider scanner test (sample data)", format_alert(sample), "default",
-                  html_body=email_html(sample, "Insider scanner test (sample data)"), push_body=push_text(sample),
+    sent = notify("Insider scanner test (sample data)", format_alert(rsample), "default",
+                  html_body=email_html(rsample, "Insider scanner test (sample data)"), push_body=push_text(rsample),
                   url=url)
     print("sent via:", sent or "NOTHING (check NTFY_TOPIC / PUSHOVER_* / GMAIL_* settings)")
 
@@ -1340,6 +1395,380 @@ def write_csv(results, out_dir: Path):
     return p
 
 
+# ==========================================================================
+# RESEARCH RULE: the cluster rule and 0-4 score from the insider-buying-research study
+# (repo kidcharlema9ne/insider-buying-research: D-057, D-064, D-065, D-066 in docs/DECISION_LOG.md;
+#  Entries 36, 37, 41, 66, 67 in docs/SHARED_LOG.md). The sealed-year test (Entry 93) FAILED, so this is
+#  a lead the owner wants to watch live, not a proven edge. Alerts say so in the report footer.
+# ==========================================================================
+RULE = {
+    "min_buyers": 4,                 # distinct officers/directors (D-057)
+    "window_sessions": 15,           # completed sessions before the entry open
+    "adv_floor_usd": 3_000_000,      # average daily dollar volume over those 15 sessions
+    "atr_bars": 14,
+    "hold_sessions": 21,             # price-only hold, entry session = day one (also the repeat-event lockout, D-065)
+    "nasdaq_lag_cut": -0.0195,       # Nasdaq (ONEQ) 63-session move minus SPY's at or below this (Entry 41 cut)
+    "fall_atr": -15.0,               # 252-session close change in ATR units at or below this (Entry 67)
+    "drawdown": 0.50,                # down at least 50% from the highest close of the prior 252 sessions (Entry 66)
+    "high_priority_score": 3,        # Pushover high priority at this score or above
+}
+RULE_ROLES = ("CEO", "CFO", "OFFICER", "DIRECTOR")      # 10% owners and "other" holders do not count
+NYSE_HOLIDAYS = {dt.date(*d) for d in [
+    (2025, 1, 1), (2025, 1, 9), (2025, 1, 20), (2025, 2, 17), (2025, 4, 18), (2025, 5, 26), (2025, 6, 19),
+    (2025, 7, 4), (2025, 9, 1), (2025, 11, 27), (2025, 12, 25),
+    (2026, 1, 1), (2026, 1, 19), (2026, 2, 16), (2026, 4, 3), (2026, 5, 25), (2026, 6, 19),
+    (2026, 7, 3), (2026, 9, 7), (2026, 11, 26), (2026, 12, 25),
+    (2027, 1, 1), (2027, 1, 18), (2027, 2, 15), (2027, 3, 26), (2027, 5, 31), (2027, 6, 18),
+    (2027, 7, 5), (2027, 9, 6), (2027, 11, 25), (2027, 12, 24)]}
+
+RULE_FACTORS = {   # key -> (plain-words name, evidence basis shown in the report)
+    "no_ceo_cfo": ("No CEO and no CFO among the buyers",
+                   "Development years 2006-2020: +0.12 ATR vs SPY, range -0.13 to +0.37 (Entry 67); weakest of the four"),
+    "nasdaq_lag": ("Nasdaq lagging the S&P 500 over 63 sessions (by 1.95 points or more)",
+                   "Development: +0.50 ATR, range +0.11 to +0.93 (Entry 67); a one-month effect with no known mechanism (Entry 37)"),
+    "deep_fall": ("Stock down 15+ ATR over the past 12 months",
+                  "Development: +0.60 ATR alone (Entry 67); survivorship and costs unresolved (Entries 65, 70)"),
+    "drawdown": ("Stock down 50%+ from its 12-month high",
+                 "Development: +0.47 ATR alone, a step at 50% (Entry 66); adds an unproven +0.33 on top of the 15-ATR fall (Entry 67)"),
+}
+ET_NAME = "America/New_York"
+
+
+def _et():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(ET_NAME)
+    except Exception:
+        return dt.timezone(dt.timedelta(hours=-5))
+
+
+def is_session(d: dt.date) -> bool:
+    return d.weekday() < 5 and d not in NYSE_HOLIDAYS
+
+
+def next_session(d: dt.date) -> dt.date:
+    """First trading session strictly after d."""
+    d += dt.timedelta(days=1)
+    while not is_session(d):
+        d += dt.timedelta(days=1)
+    return d
+
+
+def sessions_before(entry: dt.date, n: int):
+    """The n trading sessions completed before `entry`, oldest first."""
+    out, d = [], entry
+    while len(out) < n:
+        d -= dt.timedelta(days=1)
+        if is_session(d):
+            out.append(d)
+    return out[::-1]
+
+
+def sessions_between(a: dt.date, b: dt.date) -> int:
+    """Number of sessions d with a <= d < b."""
+    n, d = 0, a
+    while d < b:
+        n += is_session(d)
+        d += dt.timedelta(days=1)
+    return n
+
+
+def filed_datetime(r) -> dt.datetime:
+    """Filing time in Eastern. A date-only stamp counts as filed at the end of that day."""
+    s = (r["filed_at"] or r["filed_date"] or "").strip()
+    et = _et()
+    if len(s) <= 10:
+        return dt.datetime.combine(dt.date.fromisoformat(s[:10]), dt.time(23, 59, 59), tzinfo=et)
+    x = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    return x.replace(tzinfo=et) if x.tzinfo is None else x.astimezone(et)
+
+
+def entry_session(filed: dt.datetime) -> dt.date:
+    """Next regular open at or after the filing time (9:30 ET)."""
+    d = filed.date()
+    if is_session(d) and filed.time() < dt.time(9, 30):
+        return d
+    return next_session(d)
+
+
+def _rowkey(r):
+    return (r["accession"], r["owner_cik"], r["tx_date"])
+
+
+def routine_rows(rows):
+    """D-064 (a): three or more different buyers on one date at one price (within a cent) look plan-like.
+    Returns the set of row keys to leave out of the count."""
+    flagged, by_date = set(), {}
+    for r in rows:
+        by_date.setdefault(r["tx_date"], []).append(r)
+    for rs in by_date.values():
+        rs = sorted(rs, key=lambda r: r["price"])
+        i = 0
+        while i < len(rs):
+            grp, j = [rs[i]], i + 1
+            while j < len(rs) and rs[j]["price"] - rs[i]["price"] <= 0.01 + 1e-9:
+                grp.append(rs[j])
+                j += 1
+            if len({family_key(g["owner_name"], g["owner_cik"]) for g in grp}) >= 3:
+                flagged.update(_rowkey(g) for g in grp)
+            i = j
+    return flagged
+
+
+def issuer_is_routine(con, issuer_cik, filing_date: dt.date) -> bool:
+    """D-064 (b): the issuer already showed the same-date same-price pattern in 2 of the 3 calendar months
+    before the filing month."""
+    hits, y, m = 0, filing_date.year, filing_date.month
+    for _ in range(3):
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+        rows = [dict(r) for r in con.execute(
+            "SELECT * FROM purchases WHERE issuer_cik=? AND substr(tx_date,1,7)=?", (issuer_cik, f"{y}-{m:02d}"))]
+        hits += bool(routine_rows(rows))
+    return hits >= 2
+
+
+def research_event(con, issuer_cik, today=None):
+    """-> (event or None, reason). The event is the first filing that brings the count of distinct officers
+    and directors with a purchase inside the 15 sessions before entry to four, counting only filings already
+    public at that moment (D-057)."""
+    today = today or dt.date.today()
+    since = (today - dt.timedelta(days=60)).isoformat()
+    rows = [dict(r) for r in con.execute(
+        "SELECT * FROM purchases WHERE issuer_cik=? AND plan10b5=0 AND tx_date>=? ORDER BY filed_at",
+        (issuer_cik, since))]
+    if not rows:
+        return None, "no purchases"
+    rows = collapse_rows(rows)
+    flagged = routine_rows(rows)
+    cand = [r for r in rows if r["role"] in RULE_ROLES and not ENTITY_RE.search(r["owner_name"] or "")
+            and _rowkey(r) not in flagged]
+    for t in sorted({filed_datetime(r) for r in cand}):
+        entry = entry_session(t)
+        lo = sessions_before(entry, RULE["window_sessions"])[0].isoformat()
+        counted = [r for r in cand if filed_datetime(r) <= t and lo <= r["tx_date"] < entry.isoformat()]
+        owners: dict = {}
+        for r in counted:
+            owners.setdefault(family_key(r["owner_name"], r["owner_cik"]), []).append(r)
+        if len(owners) >= RULE["min_buyers"]:
+            if issuer_is_routine(con, issuer_cik, t.date()):
+                return None, "routine issuer (D-064 b)"
+            done = [r for r in counted if filed_datetime(r) == t]
+            return {"entry": entry, "window_start": lo, "completed_at": t, "owners": owners, "counted": counted,
+                    "accession": max(r["accession"] for r in done), "routine_left_out": len(flagged)}, None
+    return None, "fewer than four officers/directors"
+
+
+def in_prior_hold(con, issuer_cik, entry: dt.date, accession: str) -> bool:
+    """D-065: after an event, ignore the issuer until that event's 21-session hold has ended."""
+    for row in con.execute("SELECT latest_accession, payload FROM signals WHERE issuer_cik=?", (issuer_cik,)):
+        if row["latest_accession"] == accession:
+            continue
+        try:
+            p = json.loads(row["payload"])
+        except ValueError:
+            continue
+        if p.get("rule") != "research" or not p.get("entry_date"):
+            continue
+        prev = dt.date.fromisoformat(p["entry_date"])
+        if prev <= entry and sessions_between(prev, entry) < RULE["hold_sessions"]:
+            return True
+    return False
+
+
+# ---- prices -------------------------------------------------------------
+def fetch_bars(ticker: str, start: dt.date, end: dt.date):
+    """-> [(date, open, high, low, close, volume)] oldest first; [] when yfinance is unavailable or fails."""
+    try:
+        import yfinance as yf
+        h = yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat(), auto_adjust=False)
+        return [(i.date(), float(r["Open"]), float(r["High"]), float(r["Low"]), float(r["Close"]), float(r["Volume"]))
+                for i, r in h.iterrows() if math.isfinite(float(r["Close"]))]
+    except Exception:
+        return []
+
+
+def _close_on_or_before(bars, d, back=3):
+    """Close on date d, or on one of up to `back` sessions earlier (as in the study's feature code)."""
+    idx = {b[0]: b[4] for b in bars}
+    day = d
+    for _ in range(back + 1):
+        if day in idx:
+            return idx[day]
+        day -= dt.timedelta(days=1)
+    return None
+
+
+def research_features(stock, spy, oneq, entry: dt.date):
+    """Everything the score needs, using only sessions strictly before `entry`. Missing pieces are None."""
+    out = {"adv15": None, "last": None, "atr": None, "fall_atr": None, "drawdown": None, "lead63": None}
+    sb = [b for b in stock if b[0] < entry]
+    if sb:
+        out["last"] = sb[-1][4]
+    n = RULE["window_sessions"]
+    if len(sb) >= n:
+        out["adv15"] = statistics.mean(b[4] * b[5] for b in sb[-n:])
+    k = RULE["atr_bars"]
+    if len(sb) >= k + 1:
+        trs = [max(sb[i][2] - sb[i][3], abs(sb[i][2] - sb[i - 1][4]), abs(sb[i][3] - sb[i - 1][4]))
+               for i in range(len(sb) - k, len(sb))]
+        atr = sum(trs) / k
+        if atr > 0:
+            out["atr"] = atr
+            if len(sb) >= 253:
+                out["fall_atr"] = (sb[-1][4] - sb[-1 - 252][4]) / atr
+    if len(sb) >= 200:
+        hi = max(b[4] for b in sb[-252:])
+        out["drawdown"] = 1 - sb[-1][4] / hi
+    sp = [b for b in spy if b[0] < entry]
+    if len(sp) >= 64 and oneq:
+        d_last, d_ref = sp[-1][0], sp[-1 - 63][0]
+        o_last, o_ref = _close_on_or_before(oneq, d_last, 0), _close_on_or_before(oneq, d_ref)
+        if o_last and o_ref:
+            out["lead63"] = (o_last / o_ref - 1) - (sp[-1][4] / sp[-1 - 63][4] - 1)
+    return out
+
+
+def _bars(cache, bars_fn, ticker, today):
+    """Price history for one scan: each ticker (SPY and ONEQ included) is downloaded once per scan."""
+    if ticker not in cache:
+        cache[ticker] = bars_fn(ticker, today - dt.timedelta(days=460), today + dt.timedelta(days=1))
+    return cache[ticker]
+
+
+# ---- scoring ------------------------------------------------------------
+def score_research(event, feats):
+    """-> (points {factor: 1/0/None}, score, how many factors could be checked). None = could not check."""
+    f = feats or {}
+    roles = {r["role"] for r in event["counted"]}
+    pts = {"no_ceo_cfo": 0 if roles & {"CEO", "CFO"} else 1}
+    pts["nasdaq_lag"] = None if f.get("lead63") is None else int(f["lead63"] <= RULE["nasdaq_lag_cut"])
+    pts["deep_fall"] = None if f.get("fall_atr") is None else int(f["fall_atr"] <= RULE["fall_atr"])
+    pts["drawdown"] = None if f.get("drawdown") is None else int(f["drawdown"] >= RULE["drawdown"])
+    known = [v for v in pts.values() if v is not None]
+    return pts, sum(known), len(known)
+
+
+def _research_detail(key, r):
+    c = r.get("context") or {}
+    p = r["points"].get(key)
+    if p is None:
+        return "Could not be checked (price data unavailable or under a year of history)"
+    if key == "no_ceo_cfo":
+        return "Buyers include a CEO or CFO" if not p else "No CEO or CFO among the buyers"
+    if key == "nasdaq_lag":
+        return f"Nasdaq minus S&P 500 over 63 sessions: {c['lead63'] * 100:+.2f} points"
+    if key == "deep_fall":
+        return f"12-month change: {c['fall_atr']:+.1f} ATR (trigger: -15 or lower)"
+    return f"{c['drawdown']:.0%} below the 12-month closing high (trigger: 50%)"
+
+
+def build_research_result(event, feats, ticker, issuer, issuer_cik, flags=()):
+    pts, score, checked = score_research(event, feats)
+    owners = event["owners"]
+    buyers = build_buyers(owners)
+    rows = event["counted"]
+    lead_rows = max(owners.values(), key=lambda rs: (ROLE_PTS[rs[0]["role"]], sum(x["value"] for x in rs)))
+    f = feats or {}
+    ctx = {k: f.get(k) for k in ("last", "adv15", "atr", "fall_atr", "drawdown", "lead63")}
+    entry = event["entry"]
+    last_day = entry
+    for _ in range(RULE["hold_sessions"] - 1):
+        last_day = next_session(last_day)
+    stats = [("Planned entry", f"{entry:%a %b %d} open (next open after the filing that made four)"),
+             ("21-session hold", f"entry day is day one; day 21 is {last_day:%a %b %d}")]
+    if f.get("adv15") is not None:
+        stats.append(("Avg daily $ volume (15 sessions)", f"${f['adv15'] / 1e6:.1f}M"))
+    if f.get("last") is not None:
+        stats.append(("Last close", f"${f['last']:.2f}"))
+    return {
+        "rule": "research", "issuer_cik": issuer_cik, "ticker": ticker, "issuer": issuer,
+        "score": score, "score_max": 4, "checked": checked, "tier": "R", "points": pts,
+        "n_insiders": len(owners), "tight_cluster": False, "lead_role": lead_rows[0]["role"],
+        "lead_owner": lead_rows[0]["owner_name"], "lead_title": lead_rows[0]["title"],
+        "total_value": round(sum(r["value"] for r in rows)), "holdings_increase": None,
+        "window_start": min(r["tx_date"] for r in rows), "latest_tx": max(r["tx_date"] for r in rows),
+        "latest_filed": event["completed_at"].date().isoformat(), "latest_accession": event["accession"],
+        "entry_date": entry.isoformat(), "flags": list(flags), "context": ctx, "buyers": buyers, "stats": stats,
+        "routine_left_out": event.get("routine_left_out", 0),
+    }
+
+
+def _research_value(key, r) -> str:
+    """Short measured value for the push line, e.g. ' (-17.2)'. Empty when the factor could not be checked."""
+    c = r.get("context") or {}
+    v = {"nasdaq_lag": ("lead63", lambda x: f"{x * 100:+.1f} pts"), "deep_fall": ("fall_atr", lambda x: f"{x:+.1f} ATR"),
+         "drawdown": ("drawdown", lambda x: f"-{x:.0%}")}.get(key)
+    return f" ({v[1](c[v[0]])})" if v and c.get(v[0]) is not None else ""
+
+
+def research_lines(r):
+    """Plain-words factor lines used by the push message and the text alert."""
+    out = []
+    for key, (name, _) in RULE_FACTORS.items():
+        p = r["points"].get(key)
+        out.append(f"{'+1' if p else ('?' if p is None else ' 0')}  {name}")
+    return out
+
+
+def research_headline(r):
+    s = f"Score {r['score']} of {r.get('score_max', 4)}"
+    if r.get("checked", 4) < 4:
+        s += f" ({4 - r['checked']} could not be checked)"
+    return s
+
+
+def run_research(con, lookback_days, today=None, use_prices=True, edgar=None, recovered=(), bars_fn=None):
+    """Scan the database for clusters that meet the research rule. -> results sorted by score."""
+    today = today or dt.date.today()
+    bars_fn = bars_fn or fetch_bars
+    since = (today - dt.timedelta(days=lookback_days)).isoformat()
+    roles = ",".join("'%s'" % x for x in RULE_ROLES)
+    ciks = [r["issuer_cik"] for r in con.execute(
+        f"""SELECT DISTINCT issuer_cik FROM purchases
+            WHERE filed_date>=? AND plan10b5=0 AND role IN ({roles})
+              AND UPPER(COALESCE(ticker,'')) NOT IN ('', 'NONE', 'N/A', 'NA')""", (since,))]
+    results, cache = [], {}
+    for cik in dict.fromkeys([*ciks, *sorted(recovered)]):
+        gap_failed = bool(edgar) and gapfill_issuer(edgar, con, cik, today) < 0
+        event, why = research_event(con, cik, today)
+        if not event:
+            continue
+        if event["completed_at"].date().isoformat() < since:
+            continue                              # the fourth buyer filed before this scan's look-back: not new
+        if in_prior_hold(con, cik, event["entry"], event["accession"]):
+            print(f"  skip {cik}: still inside an earlier event's 21-session hold (D-065)", file=sys.stderr)
+            continue
+        lead = next(iter(event["owners"].values()))[0]
+        ticker, issuer = lead["ticker"], lead["issuer_name"]
+        flags = []
+        feats = None
+        if use_prices:
+            feats = research_features(_bars(cache, bars_fn, ticker, today), _bars(cache, bars_fn, "SPY", today),
+                                      _bars(cache, bars_fn, "ONEQ", today), event["entry"])
+            if feats["adv15"] is None:
+                flags.append("liquidity_unverified")
+            elif feats["adv15"] < RULE["adv_floor_usd"]:
+                print(f"  skip {ticker}: average daily dollar volume ${feats['adv15'] / 1e6:.1f}M is under the "
+                      f"$3M floor", file=sys.stderr)
+                continue
+        else:
+            flags.append("prices_not_checked")
+        if gap_failed:
+            flags.append("HISTORY_GAP")
+        results.append(build_research_result(event, feats, ticker, issuer, cik, flags))
+    return sorted(results, key=lambda r: (-r["score"], r["ticker"]))
+
+
+RULE_SHORT = {
+    "no_ceo_cfo": "No CEO or CFO among buyers",
+    "nasdaq_lag": "Nasdaq lagging S&P 500 (63 days)",
+    "deep_fall": "Down 15+ ATR over 12 months",
+    "drawdown": "Down 50%+ from 12-month high",
+}
+
+
 def configured_channels():
     credentials = {
         "ntfy": ("NTFY_TOPIC",),
@@ -1383,13 +1812,19 @@ def cmd_scan(args, con):
     recovered = set()
     n = ingest(edgar, con, items, recovered=recovered)
     print(f"{n} open-market purchase rows stored", file=sys.stderr)
-    results = run_scoring(con, args.lookback_days, use_prices=not args.no_prices, edgar=edgar,
-                          recovered=recovered)
+    research = args.rule == "research"
+    if research:
+        results = run_research(con, args.lookback_days, use_prices=not args.no_prices, edgar=edgar,
+                               recovered=recovered)
+    else:
+        results = run_scoring(con, args.lookback_days, use_prices=not args.no_prices, edgar=edgar,
+                              recovered=recovered)
+    min_score = -1 if research else args.min_score        # the research rule alerts on every qualifying cluster
     channels = configured_channels() if not (args.no_alert or args.fresh) else []
-    new = log_signals(con, results, args.min_score, channels=channels)
+    new = log_signals(con, results, min_score, channels=channels)
     if args.fresh:
         # One-off "first full run": report every current signal, even ones already alerted before.
-        new = [r for r in results if r["score"] >= args.min_score]
+        new = [r for r in results if r["score"] >= min_score]
         print(f"FRESH RUN: reporting all {len(new)} current signals (dedupe bypassed)", file=sys.stderr)
     print_results(new)
     if new:
@@ -1450,10 +1885,31 @@ def track_rows(con):
     return out
 
 
+def research_track_rows(con):
+    """Forward return minus SPY for signals from the research rule, grouped by their 0-4 score."""
+    out = []
+    for hz in HORIZONS:
+        by: dict = {}
+        for r in con.execute(
+                """SELECT s.payload p, o.ret, o.spy_ret FROM outcomes o JOIN signals s ON s.id=o.signal_id
+                   WHERE o.horizon=? AND o.spy_ret IS NOT NULL""", (hz,)).fetchall():
+            p = json.loads(r["p"])
+            if p.get("rule") == "research":
+                by.setdefault(p["score"], []).append(r["ret"] - r["spy_ret"])
+        for sc in sorted(by):
+            out.append((sc, hz, len(by[sc]), statistics.mean(by[sc]), statistics.median(by[sc]),
+                        sum(e > 0 for e in by[sc]) / len(by[sc])))
+    return out
+
+
 def track_text(con) -> str:
     lines = [f"{'Tier':4} {'Horizon':>7} {'N':>4} {'MeanExc':>8} {'MedExc':>8} {'Win%':>6}"]
     for tier, hz, n, mean, med, win in track_rows(con):
         lines.append(f"{tier:4} {hz:>5}d {n:>4} {mean:>+8.1%} {med:>+8.1%} {win:>6.0%}")
+    rr = research_track_rows(con)
+    if rr:
+        lines += ["", "Research rule, by score (0-4):", f"{'Score':5} {'Horizon':>7} {'N':>4} {'MeanExc':>8} {'MedExc':>8} {'Win%':>6}"]
+        lines += [f"{sc:<5} {hz:>5}d {n:>4} {mean:>+8.1%} {med:>+8.1%} {win:>6.0%}" for sc, hz, n, mean, med, win in rr]
     return "\n".join(lines)
 
 
@@ -1555,7 +2011,11 @@ def main(argv=None):
     s.add_argument("--date")
     s.add_argument("--max-pages", type=int, default=10)
     s.add_argument("--lookback-days", type=int, default=3)
-    s.add_argument("--min-score", type=float, default=CFG["alert_min_score"])
+    s.add_argument("--min-score", type=float, default=CFG["alert_min_score"],
+                   help="legacy rule only; the research rule alerts on every qualifying cluster")
+    s.add_argument("--rule", choices=("research", "legacy"), default=os.environ.get("ALERT_RULE", "research"),
+                   help="research = four officers/directors in 15 sessions with the 0-4 score (default); "
+                        "legacy = the original tier A/B/C scorer")
     s.add_argument("--no-prices", action="store_true")
     s.add_argument("--fresh", action="store_true",
                    help="one-off: report ALL current signals, ignoring the already-alerted dedupe")

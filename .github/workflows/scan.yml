@@ -39,6 +39,7 @@ jobs:
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
       SIGNALS_LOG: data/signals.jsonl
+      ALERT_RULE: research        # research = four officers/directors in 15 sessions + 0-4 score; legacy = old tier A/B/C scorer
       PUBLISH_PUSH: "1"
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +52,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run offline tests
-        run: python -m unittest test_insider_scanner test_new_features
+        run: python -m unittest test_insider_scanner test_new_features test_research_rule
 
       - name: Restore database cache
         id: dbcache
