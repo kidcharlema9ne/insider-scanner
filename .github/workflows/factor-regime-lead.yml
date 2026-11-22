@@ -1,0 +1,64 @@
+name: Factor C16 follow-up - lead63 (Nasdaq leadership) by year, spell and leave-out (development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      regime_run_id:
+        description: 'factor-regime run whose regime-* feature artifacts to reuse (Entry 37)'
+        required: false
+        default: '42501167019'
+      returns_run_id:
+        description: 'refined-baseline run holding the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      year_run_id:
+        description: 'refined-study run holding the year-* artifacts'
+        required: false
+        default: '42488283630'
+      events_run_id:
+        description: 'factor-officers run holding the events_officers artifact'
+        required: false
+        default: '42498734437'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  lead:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/factor_regime.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: regime-*
+          merge-multiple: true
+          path: reports/feat
+          run-id: ${{ inputs.regime_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_officers
+          path: reports
+          run-id: ${{ inputs.events_run_id }}
+          github-token: ${{ github.token }}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/factor_regime.py lead reports/feat reports/ret reports/years reports/events_refined.json

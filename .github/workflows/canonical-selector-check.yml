@@ -1,0 +1,77 @@
+name: Canonical selector check
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/canonical-selector-check.yml'
+      - 'research/canonical/**'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      # Saved Actions artifacts from ChatGPT's 7 Nov runs (free-year-candidate-integration)
+      ORIGINALS: "13577322443 13578539048"
+      CURRENTS: "13580379189 13581190927 13582058667"
+      BENCH: "13577375610 13576401007"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify the four recovered scripts are untouched
+        run: |
+          git fetch --depth=1 origin c4fb6932d8e28ce6ffd26c93a02dc54b6684c144
+          git diff --exit-code c4fb6932d8e28ce6ffd26c93a02dc54b6684c144 -- research/recovered_20261107 && echo "Recovered scripts identical to recovery branch tip c4fb693"
+          sha256sum research/recovered_20261107/*.py
+      - name: Download ChatGPT's saved inputs
+        run: |
+          mkdir -p /tmp/in && cd /tmp/in
+          for id in $ORIGINALS $CURRENTS $BENCH; do
+            gh api repos/$REPO/actions/artifacts/$id/zip > a_$id.zip
+            mkdir -p x_$id && unzip -q -o a_$id.zip -d x_$id
+            echo "== artifact $id"; ls -l x_$id
+          done
+      - name: Run ChatGPT's scripts unchanged (first input set that passes its own assertions)
+        run: |
+          cd /tmp/in
+          (cd x_13577375610 && zip -q ../bench.zip market_benchmark_bars.csv)
+          S=$GITHUB_WORKSPACE/research/recovered_20261107
+          cur=13582058667   # only artifact that carries the 15-session dollar-volume feature
+          for orig in 13578539048 13577322443; do
+            for zid in 13581190927 13580379189; do
+              work=/tmp/run_${orig}_${zid}; mkdir -p $work; cp $S/*.py $work/
+              cp a_$cur.zip $work/current.zip; cp a_$orig.zip $work/matrix.zip; cp bench.zip $work/1.zip
+              (cd x_$zid && zip -q $work/zero.zip free_year_zero_buyer_price_candidates.json)
+              echo "##### TRY original=$orig zero-control-from=$zid"
+              if (cd $work && python liquidity_tiers.py current.zip > liq.out 2> liq.err); then
+                echo "PASSED ITS OWN ASSERTIONS: original=$orig zero-control=$zid"
+                echo "$work" > /tmp/winner; break 2
+              else
+                tail -3 $work/liq.err
+              fi
+            done
+          done
+      - name: Canonical selector check and top trades
+        run: |
+          if [ ! -f /tmp/winner ]; then echo "No input combination passed"; exit 1; fi
+          cd $(cat /tmp/winner)
+          python $GITHUB_WORKSPACE/research/canonical/check_canonical.py $(pwd)
+      - name: Step 2A robustness check
+        run: |
+          python -m pip install -q numpy
+          cd $(cat /tmp/winner)
+          python $GITHUB_WORKSPACE/research/canonical/robustness_check.py $(pwd)
+      - name: Step 2D CEO analysis and schema dump
+        run: |
+          cd $(cat /tmp/winner)
+          python $GITHUB_WORKSPACE/research/canonical/ceo_and_schema.py $(pwd)
+      - name: Step 2E role chance test
+        run: |
+          cd $(cat /tmp/winner)
+          python $GITHUB_WORKSPACE/research/canonical/chance_roles.py $(pwd)

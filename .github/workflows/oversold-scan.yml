@@ -1,0 +1,106 @@
+name: Oversold scan - RSI and distance below moving averages (in ATR) vs the 21-session excess (development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      decline_run_id:
+        description: 'factor-decline run holding the decline-* artifacts (Entry 36)'
+        required: false
+        default: '42499472150'
+      regime_run_id:
+        description: 'factor-regime run holding the regime-* artifacts (Entry 37)'
+        required: false
+        default: '42501167019'
+      returns_run_id:
+        description: 'refined-baseline run holding primary_allowed and the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      osc_run_id:
+        description: 'optional: earlier oversold-scan run whose osc-* artifacts to reuse; empty = recompute the features'
+        required: false
+        default: ''
+permissions:
+  contents: read
+  actions: read
+jobs:
+  features:
+    if: ${{ inputs.osc_run_id == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/oversold_scan.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - name: RSI and moving-average features, ${{ matrix.year }} (sessions strictly before entry; no returns computed)
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/oversold_scan.py year ${{ matrix.year }} --primary reports/primary_allowed.json --out reports/osc_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osc-${{ matrix.year }}
+          path: reports/osc_${{ matrix.year }}.json
+  scan:
+    needs: features
+    if: ${{ !cancelled() && (needs.features.result == 'success' || needs.features.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - if: ${{ inputs.osc_run_id == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: osc-*
+          merge-multiple: true
+          path: reports/osc
+      - if: ${{ inputs.osc_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: osc-*
+          merge-multiple: true
+          path: reports/osc
+          run-id: ${{ inputs.osc_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: regime-*
+          merge-multiple: true
+          path: reports/feat
+          run-id: ${{ inputs.regime_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/oversold_scan.py scan reports/osc reports/decl reports/feat reports/ret

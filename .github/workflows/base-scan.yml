@@ -1,0 +1,122 @@
+name: Base scan - consolidation then move up inside the deep-fall group (C23; stage 1 = features and distributions, NO returns; development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      decline_run_id:
+        description: 'factor-decline run holding the decline-* artifacts (Entry 36)'
+        required: false
+        default: '42499472150'
+      returns_run_id:
+        description: 'refined-baseline run holding primary_allowed (Entry 28); only the entry list is used in stage 1'
+        required: false
+        default: '42490748366'
+      stage:
+        description: 'dist = stage 1 (no returns); stage2 = returns joined (cutoffs declared in CANDIDATES.md C23)'
+        required: true
+        default: 'dist'
+        type: choice
+        options: [dist, stage2]
+      regime_run_id:
+        description: 'factor-regime run holding the regime-* artifacts (Entry 37); stage2 only'
+        required: false
+        default: '42501167019'
+      base_run_id:
+        description: 'optional: earlier base-scan run whose base-* artifacts to reuse; empty = recompute the features'
+        required: false
+        default: ''
+permissions:
+  contents: read
+  actions: read
+jobs:
+  features:
+    if: ${{ inputs.base_run_id == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/base_scan.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - name: base-window features, ${{ matrix.year }} (sessions strictly before entry; no returns computed)
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/base_scan.py baseyear ${{ matrix.year }} --primary reports/primary_allowed.json --out reports/base_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: base-${{ matrix.year }}
+          path: reports/base_${{ matrix.year }}.json
+  dist:
+    needs: features
+    if: ${{ !cancelled() && (needs.features.result == 'success' || needs.features.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - if: ${{ inputs.base_run_id == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: base-*
+          merge-multiple: true
+          path: reports/base
+      - if: ${{ inputs.base_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: base-*
+          merge-multiple: true
+          path: reports/base
+          run-id: ${{ inputs.base_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - if: ${{ inputs.stage == 'stage2' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: regime-*
+          merge-multiple: true
+          path: reports/feat
+          run-id: ${{ inputs.regime_run_id }}
+          github-token: ${{ github.token }}
+      - if: ${{ inputs.stage == 'stage2' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - run: python research/canonical/base_scan.py --selftest
+        env:
+          PYTHONPATH: .
+      - env:
+          PYTHONPATH: .
+        run: |
+          if [ "${{ inputs.stage }}" = "stage2" ]; then
+            python -u research/canonical/base_scan.py stage2 reports/base reports/decl reports/feat reports/ret
+          else
+            python -u research/canonical/base_scan.py basedist reports/base reports/decl
+          fi

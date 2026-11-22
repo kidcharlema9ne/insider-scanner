@@ -1,0 +1,23 @@
+name: SEC bulk ZIP sample validation
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'inspect_sec_bulk_zip.py'
+      - '.github/workflows/sec-bulk-sample.yml'
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect official SEC Q3 2026 ZIP
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: python inspect_sec_bulk_zip.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sec-bulk-q3-schema
+          path: reports/sec_bulk_q3_schema.json
+          if-no-files-found: warn

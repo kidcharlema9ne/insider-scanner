@@ -1,0 +1,21 @@
+name: Form 4 parser tests
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'form4_parser.py'
+      - 'test_form4_parser.py'
+      - '.github/workflows/form4-parser-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test Form 4 parser
+        run: python -m unittest -v test_form4_parser.py

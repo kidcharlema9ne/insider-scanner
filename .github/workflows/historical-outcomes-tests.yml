@@ -1,0 +1,17 @@
+name: Historical outcomes tests
+on:
+  push:
+    paths:
+      - 'price_outcomes.py'
+      - 'test_price_outcomes.py'
+      - '.github/workflows/historical-outcomes-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m unittest -v test_price_outcomes.py

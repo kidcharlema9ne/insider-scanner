@@ -1,0 +1,54 @@
+name: Decline percent profile - measured percent falls of the 12+ ATR groups at 6 and 9 months (development years only, D-068; follow-up to Entry 50)
+on:
+  workflow_dispatch:
+    inputs:
+      decline_run_id:
+        description: 'factor-decline run whose decline-* feature artifacts to reuse (Entry 36)'
+        required: false
+        default: '42499472150'
+      returns_run_id:
+        description: 'refined-baseline run holding the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      f189_run_id:
+        description: 'decline-buckets run whose f189-* artifacts to reuse (Entry 49)'
+        required: false
+        default: '42508173058'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: PYTHONPATH=. python research/canonical/decline_percent_profile.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: f189-*
+          merge-multiple: true
+          path: reports/f189
+          run-id: ${{ inputs.f189_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/decline_percent_profile.py scan reports/decl reports/f189 reports/ret

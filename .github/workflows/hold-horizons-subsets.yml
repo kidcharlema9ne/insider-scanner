@@ -1,0 +1,57 @@
+name: Hold horizons subsets - no-episodes and 2011-2020 reruns of the long holds (development years only, D-068; Entry 45)
+on:
+  workflow_dispatch:
+    inputs:
+      run63:
+        description: 'refined-baseline-hold run, hold 63'
+        required: true
+      run126:
+        description: 'refined-baseline-hold run, hold 126'
+        required: true
+      run189:
+        description: 'refined-baseline-hold run, hold 189'
+        required: true
+      run252:
+        description: 'refined-baseline-hold run, hold 252'
+        required: true
+      decline_run_id:
+        required: false
+        default: '42499472150'
+      regime_run_id:
+        required: false
+        default: '42501167019'
+      returns21_run_id:
+        description: 'refined-baseline run holding the 21-session returns (Entry 28)'
+        required: false
+        default: '42490748366'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  subsets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/hold_horizons.py --selftest
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'decline-*', merge-multiple: true, path: reports/decl, run-id: '${{ inputs.decline_run_id }}', github-token: '${{ github.token }}'}
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'regime-*', merge-multiple: true, path: reports/feat, run-id: '${{ inputs.regime_run_id }}', github-token: '${{ github.token }}'}
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'returns-*', merge-multiple: true, path: reports/r21, run-id: '${{ inputs.returns21_run_id }}', github-token: '${{ github.token }}'}
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'returns-*', merge-multiple: true, path: reports/r63, run-id: '${{ inputs.run63 }}', github-token: '${{ github.token }}'}
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'returns-*', merge-multiple: true, path: reports/r126, run-id: '${{ inputs.run126 }}', github-token: '${{ github.token }}'}
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'returns-*', merge-multiple: true, path: reports/r189, run-id: '${{ inputs.run189 }}', github-token: '${{ github.token }}'}
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'returns-*', merge-multiple: true, path: reports/r252, run-id: '${{ inputs.run252 }}', github-token: '${{ github.token }}'}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/hold_horizons.py subsets reports/decl reports/feat reports/r21 reports/r63 reports/r126 reports/r189 reports/r252

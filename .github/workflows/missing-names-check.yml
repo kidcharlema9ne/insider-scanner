@@ -1,0 +1,41 @@
+name: Missing-names diagnostic (why events have no price series; counts and names only, no returns)
+on:
+  workflow_dispatch:
+    inputs:
+      year_run_id:
+        description: 'refined-study run holding events_refined and year-* artifacts'
+        required: false
+        default: '42488283630'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/missing_names_check.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_refined
+          path: reports/events
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/missing_names_check.py reports/events/events_refined.json reports/years

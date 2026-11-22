@@ -1,0 +1,17 @@
+name: SEC episode research tests
+on:
+  push:
+    paths:
+      - 'sec_episode_research.py'
+      - 'test_sec_episode_research.py'
+      - '.github/workflows/sec-episode-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m unittest -v test_sec_episode_research.py

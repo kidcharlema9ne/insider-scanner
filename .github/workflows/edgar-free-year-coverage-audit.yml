@@ -1,0 +1,28 @@
+name: EDGAR free-year coverage audit
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/edgar-free-year-coverage-audit.yml'
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install boto3
+      - name: Audit archived originals and produce HTML report
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python audit_free_year.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: edgar-free-year-coverage-audit
+          path: reports/
+          if-no-files-found: warn

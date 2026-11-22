@@ -1,0 +1,11 @@
+# Michael's determinations (read this at the start of every chat)
+
+This file is Michael's own place for what HE has determined about the study: ideas, rules and priorities in his words. It is separate from the shared log (which records what the assistants ran). Assistants read it at the start of every chat and add to it only when Michael asks, with the date and his wording. They do not edit or reinterpret an existing item; a change is a new dated item that says what it replaces. An item here is not a tested result: the status line says what has and has not been done with it.
+
+Decisions already ratified elsewhere (pointers only; the sources govern): cluster rule and rules in force D-064, D-065, D-066, D-068 (see `research_docs/DECISION_LOG.md` and the START_HERE doc); no freezing during development (Entry 17); exploration is deliberate, declare each menu first (`research_docs/CANDIDATES.md`).
+
+## 1. Scoring system instead of a single filter (8 Nov 2026)
+Michael's idea, in his words: have a score for just the buyers (the base rule), then an extra bonus for no CEO and no CFO (or perhaps just no CFO), then extra bonuses for Nasdaq lagging or leading versus SPY ("the lead and lag"), then extra bonuses for the stock being down a certain amount.
+- Components as understood (assistant's mapping, to be confirmed by Michael): base = four or more distinct buyers (0 points); R = no CEO and no CFO among the buyers (alternative wording: no CFO alone); N = Nasdaq lagging SPY over 63 sessions (the log's lead63 lowest fifth is the sturdy half; Michael also named "leading", which the log found weaker); D = a deep fall over a look-back (amount and window not yet chosen by Michael).
+- NOT yet decided by Michael: the point weights (equal weights are only a placeholder), whether R means "no CEO and no CFO" or "no CFO", whether N includes the leading side, and the size and window of the fall.
+- Status: idea recorded. A first descriptive scan with equal one-point flags is Entry 51 in `research_docs/SHARED_LOG.md` (script `research/canonical/score_scan.py`). Nothing has been tested on held-out data and no weights have been fitted; anything chosen after looking at the data is a lead, not a rule.

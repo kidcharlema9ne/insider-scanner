@@ -1,0 +1,95 @@
+name: Decline-bucket scan - how far the stock fell over 1/3/6/9/12 months vs the next 21-session excess (development years only, D-068; Entry 48)
+on:
+  workflow_dispatch:
+    inputs:
+      decline_run_id:
+        description: 'factor-decline run whose decline-* feature artifacts to reuse (Entry 36)'
+        required: false
+        default: '42499472150'
+      returns_run_id:
+        description: 'refined-baseline run holding primary_allowed and the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      f189_run_id:
+        description: 'optional: earlier decline-buckets run whose f189-* artifacts to reuse; empty = recompute the 9-month features'
+        required: false
+        default: ''
+permissions:
+  contents: read
+  actions: read
+jobs:
+  features:
+    if: ${{ inputs.f189_run_id == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/decline_buckets.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - name: 9- and 12-month look-back features, ${{ matrix.year }} (sessions strictly before entry; no returns computed)
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/decline_buckets.py year ${{ matrix.year }} --primary reports/primary_allowed.json --out reports/f189_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: f189-${{ matrix.year }}
+          path: reports/f189_${{ matrix.year }}.json
+  scan:
+    needs: features
+    if: ${{ !cancelled() && (needs.features.result == 'success' || needs.features.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - if: ${{ inputs.f189_run_id == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: f189-*
+          merge-multiple: true
+          path: reports/f189
+      - if: ${{ inputs.f189_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: f189-*
+          merge-multiple: true
+          path: reports/f189
+          run-id: ${{ inputs.f189_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/decline_buckets.py scan reports/decl reports/f189 reports/ret

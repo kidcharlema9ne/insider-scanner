@@ -1,0 +1,42 @@
+name: SEC real-quarter importer integration
+on:
+  push:
+    paths:
+      - '.github/workflows/sec-real-quarter-import.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import official Q3 2026 SEC bulk ZIP
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          python - <<'PY'
+          import json,os,sqlite3,urllib.request
+          from pathlib import Path
+          from sec_bulk_importer import import_zip,disclosure_opportunities
+          url="https://www.sec.gov/files/datastandardsinnovation/data/insider-transactions-data-sets/2026q3_form345.zip"
+          req=urllib.request.Request(url,headers={"User-Agent":os.environ["SEC_USER_AGENT"]})
+          with urllib.request.urlopen(req,timeout=90) as r: payload=r.read()
+          db=sqlite3.connect(":memory:")
+          count=import_zip(payload,db)
+          opportunities=list(disclosure_opportunities(db))
+          summary={"quarter":"2026q3","candidate_purchase_rows":count,"distinct_disclosure_security_opportunities":len(opportunities),
+                   "flagged_rows":db.execute("select count(*) from purchase_candidates where review_flags != '[]'").fetchone()[0],
+                   "sample_opportunities":opportunities[:3]}
+          Path("reports").mkdir(exist_ok=True)
+          Path("reports/sec_q3_import_summary.json").write_text(json.dumps(summary,indent=2))
+          print(json.dumps({k:v for k,v in summary.items() if k!="sample_opportunities"},indent=2))
+          if count<100:raise SystemExit("Unexpectedly few P purchases")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sec-q3-import-summary
+          path: reports/sec_q3_import_summary.json
+          if-no-files-found: warn

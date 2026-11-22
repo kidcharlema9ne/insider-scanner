@@ -1,0 +1,94 @@
+name: Insider history C41b - robustness of the earlier-buy and net-seller leads (development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      history_run_id:
+        description: 'insider-history run holding history_rows, episodes and epret-* (Entry 85 clean run)'
+        required: false
+        default: '42632725951'
+      roles_run_id:
+        description: 'factor-roles run holding the events_roles artifact (Entry 32)'
+        required: false
+        default: '42493259014'
+      year_run_id:
+        description: 'refined-study run holding the year-* artifacts'
+        required: false
+        default: '42488283630'
+      returns_run_id:
+        description: 'refined-baseline run holding the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      decline_run_id:
+        description: 'factor-decline run holding the decline-* artifacts (Entry 36)'
+        required: false
+        default: '42499472150'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  robust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/insider_history.py --selftest
+        env:
+          PYTHONPATH: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_roles
+          path: reports
+          run-id: ${{ inputs.roles_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: history_rows
+          path: reports
+          run-id: ${{ inputs.history_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: episodes
+          path: reports/ep
+          run-id: ${{ inputs.history_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: epret-*
+          merge-multiple: true
+          path: reports/epret
+          run-id: ${{ inputs.history_run_id }}
+          github-token: ${{ github.token }}
+      - name: Reproduce Entry 85 (the loader was refactored)
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/insider_history.py summary --events reports/events_refined.json --years reports/years --returns reports/ret --decline reports/decl --rows reports/history_rows.json --ep-dir reports/ep --epret-dir reports/epret | grep -E "^cohort|WHOLE COHORT|all sales, at least 1|score > 0 (YES|NO)" | head -8
+      - name: C41b robustness
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/insider_history.py robust --events reports/events_refined.json --years reports/years --returns reports/ret --decline reports/decl --rows reports/history_rows.json --ep-dir reports/ep --epret-dir reports/epret

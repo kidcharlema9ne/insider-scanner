@@ -1,0 +1,70 @@
+name: Window variant conditions (C39, the four conditions on an already-built window set; development years only, D-068; exploratory)
+on:
+  workflow_dispatch:
+    inputs:
+      window:
+        description: 'Window of the finished cluster-window-variant run (21 or 42)'
+        required: true
+      run_id:
+        description: 'Run id of that cluster-window-variant run (holds the events_w, year-w, decline-w, regime-w, returns-w and dd-w artifacts)'
+        required: true
+permissions:
+  contents: read
+  actions: read
+env:
+  CLUSTER_WINDOW: ${{ inputs.window }}
+jobs:
+  conditions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_w${{ inputs.window }}
+          path: reports
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-w${{ inputs.window }}-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-w${{ inputs.window }}-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: regime-w${{ inputs.window }}-*
+          merge-multiple: true
+          path: reports/feat
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-w${{ inputs.window }}-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dd-w${{ inputs.window }}-*
+          merge-multiple: true
+          path: reports/dd
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: The four conditions on this window's set
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/flag_combo_counts.py reports/events_refined.json reports/years reports/decl reports/feat reports/ret reports/dd

@@ -1,0 +1,30 @@
+name: SEC Form 4 master-index reconciliation
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sec-index-reconciliation.yml'
+      - 'reconcile_sec_master_index.py'
+      - 'test_reconcile_sec_master_index.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: python -m unittest -v test_reconcile_sec_master_index.py
+      - name: Reconcile SEC indexes against R2 manifest
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: python reconcile_sec_master_index.py
+      - name: Publish HTML JSON and missing-accession CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec-form4-index-reconciliation
+          path: reports/sec_*
+          if-no-files-found: warn

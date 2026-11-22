@@ -1,0 +1,62 @@
+name: EDGAR to R2 smoke test
+on:
+  workflow_dispatch:
+    inputs:
+      contact:
+        description: SEC contact email
+        required: true
+permissions:
+  contents: read
+concurrency: edgar-r2-smoke
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install boto3
+      - name: Verify original SEC filing in R2
+        env:
+          SEC_CONTACT: ${{ inputs.contact }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          python - <<'PY'
+          import hashlib, os, subprocess
+          from pathlib import Path
+          from botocore.exceptions import ClientError
+          from r2_storage import BUCKET, client
+
+          key = 'sec/edgar/smoke-test/0001868288-26-000002.txt'
+          expected = '2642eb3b99cbc6f05bbd84ba1ef63118f276ec9a9fb9c1979308c1d6ddf4c4c3'
+          storage = client()
+
+          def verify(data):
+              if hashlib.sha256(data).hexdigest() != expected:
+                  raise SystemExit('Filing checksum mismatch')
+
+          try:
+              existing = storage.get_object(Bucket=BUCKET, Key=key)
+          except ClientError as error:
+              if error.response['ResponseMetadata']['HTTPStatusCode'] != 404:
+                  raise
+          else:
+              with existing['Body'] as body:
+                  verify(body.read())
+              print('SKIPPED: existing R2 filing verified')
+              raise SystemExit(0)
+
+          url = 'https://www.sec.gov/Archives/edgar/data/1326380/000186828826000002/0001868288-26-000002.txt'
+          result = subprocess.run(['curl', '-fLsS', '--max-time', '30', '-A',
+                                   'Insider Buying Research ' + os.environ['SEC_CONTACT'],
+                                   '-o', 'edgar-test.txt', url])
+          if result.returncode:
+              raise SystemExit(f'SEC download failed (curl exit {result.returncode})')
+          data = Path('edgar-test.txt').read_bytes()
+          verify(data)
+          storage.put_object(Bucket=BUCKET, Key=key, Body=data)
+          with storage.get_object(Bucket=BUCKET, Key=key)['Body'] as body:
+              verify(body.read())
+          print('UPLOADED: R2 read-back SHA-256 verified')
+          PY

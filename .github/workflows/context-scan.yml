@@ -1,0 +1,131 @@
+name: Context scan - bounce off the 12-month low (C20), dollar volume (C21), SPY 200-day gate (C22) (development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      which:
+        description: 'which scan: bounce, dv or gate'
+        required: true
+        default: 'bounce'
+        type: choice
+        options: [bounce, dv, gate]
+      decline_run_id:
+        description: 'factor-decline run holding the decline-* artifacts (Entry 36)'
+        required: false
+        default: '42499472150'
+      regime_run_id:
+        description: 'factor-regime run holding the regime-* artifacts (Entry 37)'
+        required: false
+        default: '42501167019'
+      returns_run_id:
+        description: 'refined-baseline run holding primary_allowed and the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      dv_run_id:
+        description: 'dollar-volume-profile run holding the dv-* artifacts (Entry 54)'
+        required: false
+        default: '42518394556'
+      low_run_id:
+        description: 'optional: earlier context-scan (bounce) run whose low-* artifacts to reuse; empty = recompute the features'
+        required: false
+        default: ''
+permissions:
+  contents: read
+  actions: read
+jobs:
+  features:
+    if: ${{ inputs.which == 'bounce' && inputs.low_run_id == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/context_scan.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - name: 12-month-low features, ${{ matrix.year }} (sessions strictly before entry; no returns computed)
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/context_scan.py lowyear ${{ matrix.year }} --primary reports/primary_allowed.json --out reports/low_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: low-${{ matrix.year }}
+          path: reports/low_${{ matrix.year }}.json
+  scan:
+    needs: features
+    if: ${{ !cancelled() && (needs.features.result == 'success' || needs.features.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/context_scan.py --selftest
+      - if: ${{ inputs.which == 'bounce' && inputs.low_run_id == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: low-*
+          merge-multiple: true
+          path: reports/low
+      - if: ${{ inputs.which == 'bounce' && inputs.low_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: low-*
+          merge-multiple: true
+          path: reports/low
+          run-id: ${{ inputs.low_run_id }}
+          github-token: ${{ github.token }}
+      - if: ${{ inputs.which == 'dv' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dv-*
+          merge-multiple: true
+          path: reports/dv
+          run-id: ${{ inputs.dv_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: regime-*
+          merge-multiple: true
+          path: reports/feat
+          run-id: ${{ inputs.regime_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - name: scan (${{ inputs.which }})
+        env:
+          PYTHONPATH: .
+        run: |
+          case "${{ inputs.which }}" in
+            bounce) python -u research/canonical/context_scan.py bounce reports/low reports/decl reports/feat reports/ret ;;
+            dv)     python -u research/canonical/context_scan.py dv reports/dv reports/decl reports/feat reports/ret ;;
+            gate)   python -u research/canonical/context_scan.py gate reports/decl reports/feat reports/ret ;;
+          esac

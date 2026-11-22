@@ -1,0 +1,39 @@
+name: R2 SEC filing storage inventory
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install boto3
+      - name: Count SEC originals and calculate actual storage
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          python - <<'PY'
+          from r2_storage import BUCKET, client
+          s3 = client()
+          prefixes = ['sec/edgar/free-year/originals/', 'sec/edgar/smoke-test/']
+          grand_count = grand_bytes = 0
+          for prefix in prefixes:
+              count = total = 0
+              for page in s3.get_paginator('list_objects_v2').paginate(Bucket=BUCKET, Prefix=prefix):
+                  for obj in page.get('Contents', []):
+                      count += 1
+                      total += obj['Size']
+              grand_count += count
+              grand_bytes += total
+              print(f'{prefix}: {count:,} files, {total:,} bytes, {total/1e9:.6f} GB, average {total/count/1024:.2f} KiB' if count else f'{prefix}: 0 files')
+          print(f'TOTAL SEC originals across listed prefixes: {grand_count:,} files, {grand_bytes:,} bytes ({grand_bytes/1e9:.6f} GB)')
+          if grand_count:
+              avg = grand_bytes/grand_count
+              print(f'Average: {avg/1024:.2f} KiB/file')
+              for n in [1_000_000, 1_500_000, 2_000_000]:
+                  print(f'Projected {n:,} filings at observed average: {n*avg/1e9:.2f} GB (uncompressed)')
+          PY

@@ -1,0 +1,28 @@
+name: Split-adjustment probe (prints close and volume around known splits; no returns)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {symbol: FAST, start: '2019-05-13', end: '2019-06-07'}
+          - {symbol: FAST, start: '2011-05-09', end: '2011-06-03'}
+          - {symbol: GE, start: '2021-07-26', end: '2021-08-10'}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/identity_check.py probe ${{ matrix.symbol }} --start ${{ matrix.start }} --end ${{ matrix.end }}

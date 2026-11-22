@@ -1,0 +1,33 @@
+name: SEC bulk historical archive to R2
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/sec-bulk-historical-archive.yml'
+      - 'archive_sec_bulk_history.py'
+      - 'sec_archive_scope.py'
+permissions:
+  contents: read
+concurrency:
+  group: sec-bulk-historical-archive
+  cancel-in-progress: false
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install boto3
+      - name: Download and verify historical quarterly ZIPs
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python -u archive_sec_bulk_history.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sec-bulk-archive-manifest
+          path: reports/sec_bulk_archive_manifest.json
+          if-no-files-found: warn

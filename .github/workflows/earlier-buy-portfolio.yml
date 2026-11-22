@@ -1,0 +1,137 @@
+name: Earlier-buy veto and bonus through the portfolio engine (C42; development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      roles_run_id:
+        description: 'factor-roles run holding the events_roles artifact (Entry 32)'
+        required: false
+        default: '42493259014'
+      year_run_id:
+        description: 'refined-study run holding the year-* artifacts'
+        required: false
+        default: '42488283630'
+      decline_run_id:
+        description: 'factor-decline run holding the decline-* artifacts (Entry 36)'
+        required: false
+        default: '42499472150'
+      regime_run_id:
+        description: 'factor-regime run holding the regime-* artifacts (Entry 37)'
+        required: false
+        default: '42501167019'
+      returns_run_id:
+        description: 'refined-baseline run holding the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      dd_run_id:
+        description: 'drawdown-scan run holding the dd-* artifacts (Entry 66)'
+        required: false
+        default: '42536126909'
+      dv_run_id:
+        description: 'dollar-volume-profile run holding the dv-* artifacts (Entry 54)'
+        required: false
+        default: '42518394556'
+      pf_run_id:
+        description: 'portfolio-sim run holding the pf-* per-trade paths (Entry 82)'
+        required: false
+        default: '42624583101'
+      history_run_id:
+        description: 'insider-history run holding history_rows, episodes and epret-* (Entry 85 clean run)'
+        required: false
+        default: '42632725951'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/earlier_buy_portfolio.py --selftest
+        env:
+          PYTHONPATH: .
+      - run: python research/canonical/portfolio_sim.py --selftest
+        env:
+          PYTHONPATH: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_roles
+          path: reports
+          run-id: ${{ inputs.roles_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: regime-*
+          merge-multiple: true
+          path: reports/feat
+          run-id: ${{ inputs.regime_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dd-*
+          merge-multiple: true
+          path: reports/dd
+          run-id: ${{ inputs.dd_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dv-*
+          merge-multiple: true
+          path: reports/dv
+          run-id: ${{ inputs.dv_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pf-*
+          merge-multiple: true
+          path: reports/pf
+          run-id: ${{ inputs.pf_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: history_rows
+          path: reports
+          run-id: ${{ inputs.history_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: episodes
+          path: reports/ep
+          run-id: ${{ inputs.history_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: epret-*
+          merge-multiple: true
+          path: reports/epret
+          run-id: ${{ inputs.history_run_id }}
+          github-token: ${{ github.token }}
+      - name: C42 earlier-buy veto and bonus
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/earlier_buy_portfolio.py scan reports/events_refined.json reports/years reports/decl reports/feat reports/ret reports/dd reports/dv reports/pf reports/history_rows.json reports/ep reports/epret

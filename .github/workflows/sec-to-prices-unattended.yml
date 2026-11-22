@@ -1,0 +1,63 @@
+name: Unattended SEC-to-prices preparation
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - SEC bulk historical archive to R2
+    types: [completed]
+permissions:
+  contents: read
+concurrency:
+  group: sec-to-prices-preparation
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python dependencies
+        run: python -m pip install boto3
+      - name: Verify parsing, grouping, outcomes, and scanner tests
+        run: python -m unittest discover -v
+      - name: Build historical SEC database from verified archived quarters
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python -u build_historical_sec_database.py
+      - name: Audit database and field coverage
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python -u validate_historical_candidates.py
+      - name: Write handoff status
+        if: success()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report=json.loads(Path("reports/preprice_validation.json").read_text())
+          Path("reports/SEC_DATABASE_VALIDATION.md").write_text(
+              "# Historical SEC database validation\n\n"
+              "SEC archive and candidate database passed this workflow audit.\n\n"
+              f"Quarters: {report['imported_quarters']}\n\n"
+              f"Purchase rows: {report['candidate_rows']}\n\n"
+              f"Unique filings: {report['unique_filings']}\n\n"
+              "Historical entry: next regular session open after SEC filing date (D-051).\n\n"
+              "Remaining price and end-to-end requirements: daily split-adjusted OHLCV, point-in-time security mapping, "
+              "delisted securities, dividend/corporate-action data, benchmark and industry history. "
+              "No paid price data has been purchased.\n")
+          PY
+      - name: Publish diagnostics and price handoff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec-to-prices-preparation-results
+          path: |
+            reports/sec_historical_import_summary.json
+            reports/preprice_validation.json
+            reports/SEC_DATABASE_VALIDATION.md
+          if-no-files-found: warn

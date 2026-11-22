@@ -1,0 +1,16 @@
+name: Scanner alert tests
+on:
+  push:
+    paths:
+      - 'scanner_alerts.py'
+      - 'test_scanner_alerts.py'
+      - '.github/workflows/scanner-alert-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m unittest -v test_scanner_alerts.py

@@ -1,0 +1,161 @@
+name: Distinct purchase dates variant (C41, base case rebuilt with a date condition on the four buyers; development years only, D-068; exploratory)
+on:
+  workflow_dispatch:
+    inputs:
+      date_rule:
+        description: 'm4 = four buyers on four different dates; d3 = purchases span >= 3 dates; d2 = >= 2 dates'
+        required: true
+        default: 'm4'
+      old_returns_run_id:
+        description: 'refined-baseline run holding the 15-session returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+permissions:
+  contents: read
+  actions: read
+env:
+  DATE_RULE: ${{ inputs.date_rule }}
+jobs:
+  events:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - name: Self-tests at the rule-in-force window
+        env:
+          DATE_RULE: ''
+          PYTHONPATH: .
+        run: |
+          python research/canonical/refined_study.py --selftest
+          python research/canonical/cluster_counts_by_year.py --selftest
+          python research/canonical/refined_baseline.py --selftest
+          python research/canonical/window_overlap.py --selftest
+          python research/canonical/distinct_dates_compare.py --selftest
+      - name: Build base and refined event sets at date rule ${{ inputs.date_rule }}
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_study.py events --out reports/events_refined.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: events_dr-${{ inputs.date_rule }}
+          path: reports/events_refined.json
+  audit:
+    needs: events
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_dr-${{ inputs.date_rule }}
+          path: reports
+      - name: Identity v2 and floor, ${{ matrix.year }}
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_study.py year ${{ matrix.year }} --events reports/events_refined.json --out reports/year_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: year-dr-${{ inputs.date_rule }}-${{ matrix.year }}
+          path: reports/year_${{ matrix.year }}.json
+  primary:
+    needs: audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-dr-${{ inputs.date_rule }}-*
+          merge-multiple: true
+          path: reports/years
+      - name: Rebuild primary set (development years only), keep allowed entries
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_baseline.py primary reports/years --out reports/primary_allowed.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: primary_allowed_dr-${{ inputs.date_rule }}
+          path: reports/primary_allowed.json
+  returns:
+    needs: primary
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        with:
+          name: primary_allowed_dr-${{ inputs.date_rule }}
+          path: reports
+      - name: Returns, ${{ matrix.year }}
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_baseline.py year ${{ matrix.year }} --primary reports/primary_allowed.json --out reports/returns_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: returns-dr-${{ inputs.date_rule }}-${{ matrix.year }}
+          path: reports/returns_${{ matrix.year }}.json
+  summary:
+    needs: returns
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-dr-${{ inputs.date_rule }}-*
+          merge-multiple: true
+          path: reports/new
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/old
+          run-id: ${{ inputs.old_returns_run_id }}
+          github-token: ${{ github.token }}
+      - name: Standard returns summary of the variant set
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_baseline.py summary reports/new
+      - name: Compare with the rule in force
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/distinct_dates_compare.py reports/new reports/old ${{ inputs.date_rule }}

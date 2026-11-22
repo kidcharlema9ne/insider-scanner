@@ -1,0 +1,71 @@
+name: Refined baseline returns at a longer hold (development years only, D-068; Entry 43)
+on:
+  workflow_dispatch:
+    inputs:
+      hold:
+        description: 'Hold in sessions (entry session = day one): 63, 126, 189 or 252'
+        required: true
+        default: '63'
+      year_run_id:
+        description: 'Run of refined-study.yml whose year-* artifacts hold the identity and floor results'
+        required: false
+        default: '42488283630'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  primary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - run: python research/canonical/refined_baseline.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - name: Rebuild primary set, assert Entry 25 counts, keep only allowed entries
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_baseline.py primary reports/years --out reports/primary_allowed.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports/primary_allowed.json
+  returns:
+    needs: primary
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports
+      - name: Returns, ${{ matrix.year }}
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_baseline.py year ${{ matrix.year }} --primary reports/primary_allowed.json --hold ${{ inputs.hold }} --out reports/returns_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: returns-${{ matrix.year }}
+          path: reports/returns_${{ matrix.year }}.json

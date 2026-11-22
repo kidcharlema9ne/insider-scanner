@@ -37,3 +37,17 @@ Not investment advice; signals are research leads.
 ## External scheduler reminder
 
 The user also uses **Cron-job.org** (https://cron-job.org/) as a website/service for running or triggering the Insider Scanner. If asked later how the scanner is run or where to manage its external scheduled trigger, remember **Cron-job.org** and check that account's configured cron jobs. This note records the user's stated setup; the actual Cron-job.org job URL, schedule, and current enabled status have not been verified here. The repository also contains a native GitHub Actions schedule in `.github/workflows/scan.yml`; check both before changing schedules to avoid duplicate runs.
+
+## Insider buying research study (moved here 22 Nov 2026)
+
+The full research study behind the scanner's rule now lives in this repo, moved from the old
+`insider-buying-research` repo (now `Market-Data`, which keeps only price data and the alert senders).
+
+- Research instructions: `AGENTS.md`. Original study README: `RESEARCH_README.md`.
+- Findings, decisions and the running log: `research_docs/` (start with `LEADS_DIGEST.md`, `CANDIDATES.md`,
+  `MICHAEL_DETERMINATIONS.md`, and the newest entries of `SHARED_LOG.md`).
+- Study code: root-level Python files (Form 4 parser, SEC importers, outcomes) and `research/canonical/`.
+- Research workflows: `.github/workflows/` (everything except `scan.yml`, which is the live scanner).
+- Run links in the logs point at the old repo's Actions history, which stays in `Market-Data`.
+- These workflows need the Actions secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT_URL`,
+  `SEC_USER_AGENT` and `MARKETPARQUET_API_KEY` added to this repo before they can run.

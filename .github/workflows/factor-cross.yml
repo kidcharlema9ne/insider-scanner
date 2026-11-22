@@ -1,0 +1,58 @@
+name: Factor cross - lead63 (Nasdaq lagging) with the 12-month decline measures (development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      decline_run_id:
+        description: 'factor-decline run whose decline-* feature artifacts to reuse (Entry 36)'
+        required: false
+        default: '42499472150'
+      regime_run_id:
+        description: 'factor-regime run whose regime-* feature artifacts to reuse (Entry 37)'
+        required: false
+        default: '42501167019'
+      returns_run_id:
+        description: 'refined-baseline run holding the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      start:
+        description: 'optional first entry date to keep (e.g. 2011-01-01); empty = all development years'
+        required: false
+        default: ''
+permissions:
+  contents: read
+  actions: read
+jobs:
+  cross:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/factor_cross.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: regime-*
+          merge-multiple: true
+          path: reports/feat
+          run-id: ${{ inputs.regime_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/factor_cross.py cross reports/decl reports/feat reports/ret ${{ inputs.start != '' && format('--start {0}', inputs.start) || '' }}

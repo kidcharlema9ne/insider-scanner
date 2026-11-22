@@ -1,0 +1,43 @@
+name: Cost realism for the 12-month-fall lead (assumed percent costs in ATR units; D-068 guard via factor_decline.load)
+on:
+  workflow_dispatch:
+    inputs:
+      returns_run_id:
+        description: 'refined-baseline run holding returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      features_run_id:
+        description: 'factor-decline run holding decline-* artifacts (Entry 36)'
+        required: false
+        default: '42499472150'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/cost_realism.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/feat
+          run-id: ${{ inputs.features_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/cost_realism.py reports/feat reports/ret

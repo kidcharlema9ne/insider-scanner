@@ -1,0 +1,17 @@
+name: Research statistics tests
+on:
+  push:
+    paths:
+      - 'research_statistics.py'
+      - 'test_research_statistics.py'
+      - '.github/workflows/research-statistics-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m unittest -v test_research_statistics.py

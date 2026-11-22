@@ -1,0 +1,22 @@
+name: Integrated research dataset and HTML report tests
+on:
+  push:
+    paths:
+      - 'integrated_research_dataset.py'
+      - 'research_html_report.py'
+      - 'test_integrated_research_report.py'
+      - 'research_statistics.py'
+      - 'entry_features.py'
+      - 'research_benchmarks.py'
+      - 'test_research_benchmarks.py'
+      - '.github/workflows/integrated-research-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m unittest discover -v

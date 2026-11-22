@@ -1,0 +1,38 @@
+name: Factor C3/C5 - CEO and CFO among the buyers at a longer hold (development years only, D-068; Entry 48)
+on:
+  workflow_dispatch:
+    inputs:
+      returns_run_id:
+        description: 'refined-baseline-hold run holding the returns-* artifacts for the hold being tested (42-session run 42507694879)'
+        required: true
+      events_run_id:
+        description: 'factor-roles run whose events_roles artifact carries each event buyers (Entry 32)'
+        required: false
+        default: '42493259014'
+      year_run_id:
+        description: 'refined-study run holding the year-* artifacts'
+        required: false
+        default: '42488283630'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/factor_roles.py --selftest
+      - uses: actions/download-artifact@v4
+        with: {name: events_roles, path: reports, run-id: '${{ inputs.events_run_id }}', github-token: '${{ github.token }}'}
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'year-*', merge-multiple: true, path: reports/years, run-id: '${{ inputs.year_run_id }}', github-token: '${{ github.token }}'}
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'returns-*', merge-multiple: true, path: reports/ret, run-id: '${{ inputs.returns_run_id }}', github-token: '${{ github.token }}'}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/factor_roles.py reports/events_refined.json reports/years reports/ret

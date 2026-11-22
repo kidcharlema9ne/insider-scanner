@@ -1,0 +1,108 @@
+name: Refined event set - D-064 routine exclusion, D-065 option C, split-grid identity, D-066 cut table (counts only, no returns)
+on:
+  workflow_dispatch:
+    inputs:
+      events_run_id:
+        description: 'Reuse the events_refined artifact from this earlier run of this workflow (skips the slow SEC step)'
+        required: false
+        default: ''
+permissions:
+  contents: read
+jobs:
+  events:
+    if: ${{ inputs.events_run_id == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - run: python research/canonical/refined_study.py --selftest
+      - run: python research/canonical/cluster_counts_by_year.py --selftest
+      - name: Build base and refined (D-064) event sets
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_study.py events --out reports/events_refined.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: events_refined
+          path: reports/events_refined.json
+  audit:
+    needs: events
+    if: ${{ !cancelled() && (needs.events.result == 'success' || needs.events.result == 'skipped') }}
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025,2026]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.events_run_id == '' }}
+        with:
+          name: events_refined
+          path: reports
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.events_run_id != '' }}
+        with:
+          name: events_refined
+          path: reports
+          run-id: ${{ inputs.events_run_id }}
+          github-token: ${{ github.token }}
+      - name: Identity v2 and floor, ${{ matrix.year }}
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_study.py year ${{ matrix.year }} --events reports/events_refined.json --out reports/year_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: year-${{ matrix.year }}
+          path: reports/year_${{ matrix.year }}.json
+  summary:
+    needs: audit
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.events_run_id == '' }}
+        with:
+          name: events_refined
+          path: events
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.events_run_id != '' }}
+        with:
+          name: events_refined
+          path: events
+          run-id: ${{ inputs.events_run_id }}
+          github-token: ${{ github.token }}
+      - run: python -u research/canonical/refined_study.py summary reports --events events/events_refined.json

@@ -1,0 +1,140 @@
+name: Free 2026 market benchmark bars
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/free-2026-market-benchmarks.yml']
+permissions:
+  contents: read
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pyarrow exchange-calendars
+      - name: Extract verified ETF OHLC with December lookback
+        env:
+          MARKETPARQUET_API_KEY: ${{ secrets.MARKETPARQUET_API_KEY }}
+        run: |
+          python -u - <<'PY'
+          import csv
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          import os
+          from decimal import Decimal
+          from io import BytesIO
+          from pathlib import Path
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlsplit
+          from urllib.request import Request, urlopen
+
+          import exchange_calendars as xcals
+          import pyarrow.parquet as pq
+
+          START, END = '2025-12-01', '2026-11-05'
+          SYMBOLS = {'SPY', 'ONEQ', 'IWM'}
+          dates = [str(day.date()) for day in xcals.get_calendar('XNYS').sessions_in_range(START, END)]
+
+          def fetch(url, label, limit, headers=None):
+              if urlsplit(url).scheme != 'https':
+                  raise ValueError(f'{label}: expected HTTPS URL')
+              try:
+                  with urlopen(Request(url, headers=headers or {}), timeout=30) as response:
+                      return response.read(limit + 1)
+              except HTTPError as error:
+                  raise ValueError(f'{label}: HTTP {error.code}') from None
+              except (URLError, TimeoutError):
+                  raise ValueError(f'{label}: network failure') from None
+
+          def marketparquet():
+              token = os.environ['MARKETPARQUET_API_KEY']
+              if not token:
+                  raise ValueError('MarketParquet API key is missing')
+              url = f'https://marketparquet.com/api/v1/manifest/etf_daily?start={START}&end={END}'
+              files = json.loads(fetch(url, 'ETF manifest', 2_000_000,
+                                       {'Authorization': f'Bearer {token}', 'User-Agent': 'Mozilla/5.0'}))['files']
+              entries = {row['date']: row for row in files}
+              if len(entries) != len(files) or sorted(entries) != dates:
+                  raise SystemExit(f'Expected {len(dates)} distinct ETF dates, got {len(entries)}')
+              print(f'Verified manifest for {len(dates)} trading sessions')
+              hashes = {}
+              rows = []
+              for day in dates:
+                  entry = entries[day]
+                  size = entry['file_size_bytes']
+                  if not 0 < size <= 8 * 1024 * 1024:
+                      raise SystemExit(f'{day}: unexpected ETF partition size')
+                  payload = fetch(entry['download_url'], day, 8 * 1024 * 1024)
+                  if len(payload) > 8 * 1024 * 1024 or payload[:4] != b'PAR1' or payload[-4:] != b'PAR1':
+                      raise ValueError(f'{day}: invalid ETF partition ({len(payload)} bytes)')
+                  if len(payload) != size:
+                      print(f'{day}: manifest lists {size} bytes, downloaded {len(payload)}; verifying Parquet content')
+                  hashes[day] = hashlib.sha256(payload).hexdigest()
+                  names = set(pq.ParquetFile(BytesIO(payload)).schema_arrow.names)
+                  date_field = 'date' if 'date' in names else 'timestamp'
+                  bars = pq.read_table(BytesIO(payload), columns=['symbol', date_field, 'open', 'high', 'low', 'close'],
+                                       filters=[('symbol', 'in', sorted(SYMBOLS))]).to_pylist()
+                  if len(bars) != len(SYMBOLS) or {r['symbol'] for r in bars} != SYMBOLS:
+                      raise SystemExit(f'{day}: incomplete or duplicate benchmark bars')
+                  for row in sorted(bars, key=lambda r: r['symbol']):
+                      values = [Decimal(str(row[k])) for k in ('open', 'high', 'low', 'close')]
+                      if str(row[date_field])[:10] != day or not (all(v.is_finite() for v in values) and 0 < values[2] <= min(values[0], values[3]) <= max(values[0], values[3]) <= values[1]):
+                          raise SystemExit(f'{day}: invalid benchmark bar')
+                      rows.append((day, row['symbol'], *values))
+              return rows, {'source': 'MarketParquet etf_daily', 'partition_sha256': hashes}
+
+          def yahoo_chart():
+              rows, hashes = [], {}
+              start = int(datetime.fromisoformat(START).replace(tzinfo=timezone.utc).timestamp())
+              stop = int(datetime(2026, 11, 6, tzinfo=timezone.utc).timestamp())
+              for symbol in sorted(SYMBOLS):
+                  data = None
+                  for host in ('query1.finance.yahoo.com', 'query2.finance.yahoo.com'):
+                      url = f'https://{host}/v8/finance/chart/{symbol}?period1={start}&period2={stop}&interval=1d'
+                      try:
+                          data = fetch(url, f'Yahoo Finance {symbol}', 2_000_000, {'User-Agent': 'Mozilla/5.0'})
+                          break
+                      except ValueError as error:
+                          print(error)
+                  if data is None:
+                      raise SystemExit(f'No Yahoo Finance chart data for {symbol}')
+                  result = json.loads(data)['chart']['result'][0]
+                  if result['meta']['symbol'] != symbol:
+                      raise SystemExit(f'Unexpected benchmark ticker for {symbol}')
+                  hashes[symbol] = hashlib.sha256(data).hexdigest()
+                  quote = result['indicators']['quote'][0]
+                  days = [datetime.fromtimestamp(t, timezone.utc).date().isoformat() for t in result['timestamp']]
+                  if days != dates:
+                      raise SystemExit(f'Incomplete benchmark dates for {symbol}: {len(days)} of {len(dates)}')
+                  for day, opening, high, low, closing in zip(days, quote['open'], quote['high'], quote['low'], quote['close'], strict=True):
+                      values = [Decimal(str(v)) for v in (opening, high, low, closing)]
+                      if not (all(v.is_finite() for v in values) and 0 < values[2] <= min(values[0], values[3]) <= max(values[0], values[3]) <= values[1]):
+                          raise SystemExit(f'{day}: invalid {symbol} prices')
+                      rows.append((day, symbol, *values))
+              return sorted(rows), {'source': 'Yahoo Finance unadjusted daily chart OHLC', 'response_sha256': hashes}
+
+          try:
+              rows, source = marketparquet()
+          except ValueError as error:
+              print(f'{error}; trying Yahoo Finance daily chart')
+              rows, source = yahoo_chart()
+          output = Path('reports')
+          output.mkdir()
+          with (output / 'market_benchmark_bars.csv').open('w', newline='') as stream:
+              writer = csv.writer(stream)
+              writer.writerow(('date', 'symbol', 'open', 'high', 'low', 'close'))
+              writer.writerows(rows)
+          (output / 'market_benchmark_source.json').write_text(json.dumps({
+              **source, 'start': START, 'end': END, 'session_count': len(dates),
+          }, indent=2))
+          print(f'Verified {len(rows)} benchmark bars across {len(dates)} sessions')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: free-2026-market-benchmark-bars
+          path: reports/market_benchmark_*
+          if-no-files-found: error

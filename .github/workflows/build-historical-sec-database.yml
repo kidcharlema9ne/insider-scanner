@@ -1,0 +1,27 @@
+name: Build historical SEC candidate database
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: historical-sec-candidate-database
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install boto3
+      - name: Build and upload verified SQLite candidate database
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python -u build_historical_sec_database.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: historical-sec-import-summary
+          path: reports/sec_historical_import_summary.json
+          if-no-files-found: warn

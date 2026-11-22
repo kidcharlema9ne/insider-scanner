@@ -1,0 +1,91 @@
+name: EDGAR free-year batch to R2
+on:
+  workflow_dispatch:
+    inputs:
+      contact:
+        description: SEC contact email
+        required: true
+permissions:
+  contents: read
+concurrency: edgar-free-year-batch
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install boto3
+      - name: Archive and verify originals
+        env:
+          SEC_CONTACT: ${{ inputs.contact }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          python -u - <<'PY'
+          from pathlib import Path
+          import hashlib, os, re, subprocess, time
+          from r2_storage import BUCKET, client
+
+          rows = Path('edgar-free-year-manifest.txt').read_text().splitlines()
+          records = [re.fullmatch(r'edgar/data/([0-9]+)/([0-9]{10}-[0-9]{2}-[0-9]{6})[.]txt', row).groups() for row in rows]
+          assert len(rows) == len({a for _, a in records}) == 16005
+          storage = client()
+          prefix = 'sec/edgar/free-year/originals/'
+          existing = {obj['Key'] for page in storage.get_paginator('list_objects_v2').paginate(Bucket=BUCKET, Prefix=prefix)
+                      for obj in page.get('Contents', [])}
+          def download_original(cik, accession):
+              root = f'https://www.sec.gov/Archives/edgar/data/{cik}'
+              for url in (f"{root}/{accession.replace('-', '')}/{accession}.txt",
+                          f'{root}/{accession}.txt'):
+                  result = subprocess.run(
+                      ['curl', '-LsS', '--max-time', '40', '--retry', '3',
+                       '--retry-max-time', '120', '--write-out', '%{http_code}',
+                       '-A', 'Insider Buying Research ' + os.environ['SEC_CONTACT'], url],
+                      stdout=subprocess.PIPE, check=False)
+                  time.sleep(0.5)
+                  if result.returncode:
+                      raise SystemExit(f'SEC download failed for {accession}: curl exit {result.returncode}')
+                  data, status = result.stdout[:-3], result.stdout[-3:]
+                  if status == b'200':
+                      return data
+                  if status != b'404':
+                      raise SystemExit(f'SEC download failed for {accession}: HTTP {status.decode()}')
+              return None
+
+          missing = []
+          uploaded = skipped = 0
+          for cik, accession in records:
+              key = prefix + accession + '.txt'
+              if key not in existing:
+                  data = download_original(cik, accession)
+                  if data is None:
+                      missing.append(accession)
+                      print(f'MISSING: {accession}; both SEC URLs returned HTTP 404')
+                      continue
+                  if accession.encode() not in data or not re.search(rb'<ACCEPTANCE-DATETIME>[0-9]{14}', data):
+                      raise SystemExit(f'Invalid original: {accession}')
+                  sha = hashlib.sha256(data).hexdigest()
+                  storage.put_object(Bucket=BUCKET, Key=key, Body=data, Metadata={'verified-sha256': sha})
+                  uploaded += 1
+              else:
+                  skipped += 1
+              obj = storage.get_object(Bucket=BUCKET, Key=key)
+              with obj['Body'] as body:
+                  if hashlib.sha256(body.read()).hexdigest() != obj['Metadata'].get('verified-sha256'):
+                      raise SystemExit(f'R2 verification failed: {accession}')
+              total = uploaded + skipped
+              if total == 1 or total % 100 == 0:
+                  print(f'Verified {total} of {len(records)}; uploaded {uploaded}; skipped {skipped}')
+          verified = uploaded + skipped
+          assert verified + len(missing) == len(records)
+          summary = (f'{verified} of {len(records)} verified; uploaded {uploaded}; '
+                     f'reused {skipped}; missing {len(missing)}')
+          print(summary)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as report:
+              print(summary, file=report)
+              for accession in missing:
+                  print(f'- Missing SEC original: `{accession}`', file=report)
+          if missing:
+              print('::warning::Archive finished with missing SEC originals. See the run summary.')
+          PY

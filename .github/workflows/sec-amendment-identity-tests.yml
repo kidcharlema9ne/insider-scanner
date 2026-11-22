@@ -1,0 +1,17 @@
+name: SEC amendments and identity tests
+on:
+  push:
+    paths:
+      - 'sec_amendments_and_identity.py'
+      - 'test_sec_amendments_and_identity.py'
+      - '.github/workflows/sec-amendment-identity-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m unittest -v test_sec_amendments_and_identity.py

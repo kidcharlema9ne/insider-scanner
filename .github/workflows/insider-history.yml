@@ -1,0 +1,147 @@
+name: Insider-level history of the cluster buyers (C41a; planned-buy pattern, net seller, return of earlier buys; development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      roles_run_id:
+        description: 'factor-roles run holding the events_roles artifact (Entry 32)'
+        required: false
+        default: '42493259014'
+      year_run_id:
+        description: 'refined-study run holding the year-* artifacts'
+        required: false
+        default: '42488283630'
+      returns_run_id:
+        description: 'refined-baseline run holding the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      decline_run_id:
+        description: 'factor-decline run holding the decline-* artifacts (Entry 36)'
+        required: false
+        default: '42499472150'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/refined_study.py --selftest
+      - run: python research/canonical/insider_history.py --selftest
+        env:
+          PYTHONPATH: .
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_roles
+          path: reports
+          run-id: ${{ inputs.roles_run_id }}
+          github-token: ${{ github.token }}
+      - name: Extract purchases and sales of every buyer from the quarterly SEC zips (filings through 2020-12-31)
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/insider_history.py extract --events reports/events_refined.json --out reports/history_rows.json
+      - name: Build earlier-buy episodes
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/insider_history.py episodes --rows reports/history_rows.json --out reports/ep
+      - uses: actions/upload-artifact@v4
+        with:
+          name: history_rows
+          path: reports/history_rows.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: episodes
+          path: reports/ep
+  returns:
+    needs: extract
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        with:
+          name: episodes
+          path: reports/ep
+      - name: Prices of the earlier buys, ${{ matrix.year }}
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_baseline.py year ${{ matrix.year }} --primary reports/ep/ep_primary.json --out reports/returns_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: epret-${{ matrix.year }}
+          path: reports/returns_${{ matrix.year }}.json
+  summary:
+    needs: returns
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_roles
+          path: reports
+          run-id: ${{ inputs.roles_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: decline-*
+          merge-multiple: true
+          path: reports/decl
+          run-id: ${{ inputs.decline_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: history_rows
+          path: reports
+      - uses: actions/download-artifact@v4
+        with:
+          name: episodes
+          path: reports/ep
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: epret-*
+          merge-multiple: true
+          path: reports/epret
+      - name: Summary
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/insider_history.py summary --events reports/events_refined.json --years reports/years --returns reports/ret --decline reports/decl --rows reports/history_rows.json --ep-dir reports/ep --epret-dir reports/epret

@@ -1,0 +1,90 @@
+name: Factor C14-C17 - market regime at entry (SPY, ONEQ) and the controller crossing (development years and 2026 pilot only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      returns_run_id:
+        description: 'refined-baseline run holding primary_allowed and the returns-* artifacts (Entry 28)'
+        required: false
+        default: '42490748366'
+      year_run_id:
+        description: 'refined-study run holding the year-* artifacts'
+        required: false
+        default: '42488283630'
+      events_run_id:
+        description: 'factor-officers run holding the events_officers artifact (refined events with buyers)'
+        required: false
+        default: '42498734437'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  features:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020,2026]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - run: python research/canonical/factor_regime.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - name: Market features, ${{ matrix.year }} (sessions strictly before entry; no returns computed)
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/factor_regime.py year ${{ matrix.year }} --primary reports/primary_allowed.json --out reports/regime_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: regime-${{ matrix.year }}
+          path: reports/regime_${{ matrix.year }}.json
+  summary:
+    needs: features
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars numpy
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: regime-*
+          merge-multiple: true
+          path: reports/feat
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: returns-*
+          merge-multiple: true
+          path: reports/ret
+          run-id: ${{ inputs.returns_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: events_officers
+          path: reports
+          run-id: ${{ inputs.events_run_id }}
+          github-token: ${{ github.token }}
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/factor_regime.py summary reports/feat reports/ret reports/years reports/events_refined.json

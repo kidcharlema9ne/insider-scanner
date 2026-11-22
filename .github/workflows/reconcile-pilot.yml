@@ -1,0 +1,82 @@
+name: Reconcile pilot - Entry 8 cohort vs refined primary set (2026 pilot only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  old:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ORIGINALS: "13577322443 13578539048"
+      CURRENTS: "13580379189 13581190927 13582058667"
+      BENCH: "13577375610 13576401007"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download ChatGPT's saved inputs
+        run: |
+          mkdir -p /tmp/in && cd /tmp/in
+          for id in $ORIGINALS $CURRENTS $BENCH; do
+            gh api repos/$REPO/actions/artifacts/$id/zip > a_$id.zip
+            mkdir -p x_$id && unzip -q -o a_$id.zip -d x_$id
+          done
+      - name: Run the recovered selector unchanged and dump all 137 trades
+        run: |
+          cd /tmp/in
+          (cd x_13577375610 && zip -q ../bench.zip market_benchmark_bars.csv)
+          S=$GITHUB_WORKSPACE/research/recovered_20261107
+          cur=13582058667
+          for orig in 13578539048 13577322443; do
+            for zid in 13581190927 13580379189; do
+              work=/tmp/run_${orig}_${zid}; mkdir -p $work; cp $S/*.py $work/
+              cp a_$cur.zip $work/current.zip; cp a_$orig.zip $work/matrix.zip; cp bench.zip $work/1.zip
+              (cd x_$zid && zip -q $work/zero.zip free_year_zero_buyer_price_candidates.json)
+              if (cd $work && python liquidity_tiers.py current.zip > liq.out 2> liq.err); then echo "$work" > /tmp/winner; break 2; fi
+            done
+          done
+          test -f /tmp/winner
+          mkdir -p $GITHUB_WORKSPACE/reports
+          python $GITHUB_WORKSPACE/research/canonical/dump_old_trades.py $(cat /tmp/winner) $GITHUB_WORKSPACE/reports/old_trades.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: old_trades
+          path: reports/old_trades.json
+  compare:
+    needs: old
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        with:
+          name: old_trades
+          path: reports
+      - uses: actions/download-artifact@v4
+        with:
+          name: returns-2026
+          path: reports/new
+          run-id: 42490748366
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: year-2026
+          path: reports/events
+          run-id: 42488283630
+          github-token: ${{ github.token }}
+      - name: Compare
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/reconcile_pilot.py reports/old_trades.json reports/new/returns_2026.json reports/events/year_2026.json

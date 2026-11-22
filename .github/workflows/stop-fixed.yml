@@ -1,0 +1,85 @@
+name: C25 fixed-stop test - four-insider entry, fixed 2 ATR stop, time exits 1, 2, 3, 6 months (development years only, D-068)
+on:
+  workflow_dispatch:
+    inputs:
+      year_run_id:
+        description: 'Run of refined-study.yml whose year-* artifacts hold the identity and floor results'
+        required: false
+        default: '42488283630'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  primary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - run: python research/canonical/refined_baseline.py --selftest
+      - run: python research/canonical/stop_fixed.py --selftest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: year-*
+          merge-multiple: true
+          path: reports/years
+          run-id: ${{ inputs.year_run_id }}
+          github-token: ${{ github.token }}
+      - name: Rebuild primary set, assert Entry 25 counts, keep only allowed entries
+        env:
+          PYTHONPATH: .
+        run: python -u research/canonical/refined_baseline.py primary reports/years --out reports/primary_allowed.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports/primary_allowed.json
+  returns:
+    needs: primary
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3 pyarrow pandas_market_calendars
+      - uses: actions/download-artifact@v4
+        with:
+          name: primary_allowed
+          path: reports
+      - name: Fixed-stop returns, ${{ matrix.year }}
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PYTHONPATH: .
+        run: python -u research/canonical/stop_fixed.py year ${{ matrix.year }} --primary reports/primary_allowed.json --out reports/returns_${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fixed-${{ matrix.year }}
+          path: reports/returns_${{ matrix.year }}.json
+  summary:
+    needs: returns
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fixed-*
+          merge-multiple: true
+          path: reports/fixed
+      - env:
+          PYTHONPATH: .
+        run: python -u research/canonical/stop_fixed.py summary reports/fixed
