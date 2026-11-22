@@ -205,7 +205,7 @@ def extract_xml(raw: str):
 IPO_STRONG = re.compile(r"initial public offering|\bIPO\b|directed share|public offering price|"
                         r"concurrent private placement|purchased from the underwriters?", re.I)
 # Non-discretionary buys (automatic plans, dividend reinvestment, employee stock purchase plans) are excluded,
-# as in the research study (insider-buying-research: form4_parser.py, sec_bulk_importer.py).
+# as in the research study (research study in this repo: form4_parser.py, sec_bulk_importer.py).
 NON_DISCRETIONARY = re.compile(r"automatic|dividend reinvest|employee stock purchase|\bESPP\b", re.I)
 IPO_WEAK = re.compile(r"underwrit|follow-?on offering|secondary offering|private placement|"
                       r"registered direct|offering price", re.I)
@@ -1431,7 +1431,7 @@ def write_csv(results, out_dir: Path):
 
 # ==========================================================================
 # RESEARCH RULE: the cluster rule and 0-4 score from the insider-buying-research study
-# (repo kidcharlema9ne/insider-buying-research: D-057, D-064, D-065, D-066 in docs/DECISION_LOG.md;
+# (this repo, research_docs/: D-057, D-064, D-065, D-066 in docs/DECISION_LOG.md;
 #  Entries 36, 37, 41, 66, 67 in docs/SHARED_LOG.md). The sealed-year test (Entry 93) FAILED, so this is
 #  a lead the owner wants to watch live, not a proven edge. Alerts say so in the report footer.
 # ==========================================================================
